@@ -1,0 +1,16 @@
+Lex Cloak PDF Tool
+Copyright (C) 2026 Monty Home LLC
+
+This product depends on the following third-party software:
+
+PyMuPDF (https://github.com/pymupdf/PyMuPDF)
+  Python bindings to the MuPDF rendering engine.
+  Copyright (c) 2016-2026 Artifex Software, Inc.
+  Dual-licensed under GNU AGPL v3 OR Artifex commercial license.
+  This distribution links PyMuPDF under the AGPL v3 -- see LICENSE.
+
+MuPDF (https://mupdf.com/)
+  PDF rendering, parsing, and manipulation library.
+  Copyright (c) 2006-2026 Artifex Software, Inc.
+  Dual-licensed under GNU AGPL v3 OR Artifex commercial license.
+  Distributed transitively via PyMuPDF under the AGPL v3.
