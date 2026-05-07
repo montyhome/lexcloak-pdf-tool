@@ -112,6 +112,28 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+def _make_pdf_triggering_mupdf_warning() -> bytes:
+    """Build a minimal PDF whose render emits a MuPDF C-side warning.
+
+    Corrupts a content-stream operator with an unknown keyword so MuPDF's
+    interpreter writes ``"MuPDF error: syntax error: unknown keyword: ..."``
+    to its message destination during page rendering. The render itself
+    still succeeds (MuPDF skips the bad op), but the warning gets emitted.
+
+    Used to regression-test that the warning routes to stderr rather than
+    contaminating stdout's IPC channel.
+    """
+    import re
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text(fitz.Point(50, 100), "Hello", fontsize=12)
+    pdf = doc.tobytes()
+    doc.close()
+    m = re.search(rb"stream\n(.*?)\nendstream", pdf, re.DOTALL)
+    assert m is not None, "expected at least one content stream in synthesized PDF"
+    return pdf[: m.start(1)] + b"NOT_A_REAL_PDF_OP /x /y" + pdf[m.end(1):]
+
+
 # ── Happy-path round-trips for every op ─────────────────────────────
 
 
@@ -156,6 +178,59 @@ def test_render_roundtrip():
     assert resp["ok"] is True
     png = base64.b64decode(resp["result"]["png_b64"])
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_render_does_not_contaminate_stdout_with_mupdf_warnings():
+    """Regression: MuPDF C-side warnings must route to stderr, not stdout.
+
+    Before the fix, MuPDF's C library wrote warning lines directly to fd 1,
+    ahead of the length-prefixed JSON response. The first 4 leaked bytes
+    (typically ``M u P D`` from ``"MuPDF error: ..."``) were read as a
+    bogus uint32 length prefix (1,299,533,892), exceeding ``MAX_PAYLOAD_BYTES``
+    and breaking the IPC. ``__main__.py`` now calls ``fitz.set_messages``
+    at startup to redirect MuPDF's C-side messages to stderr.
+    """
+    pdf = _make_pdf_triggering_mupdf_warning()
+    with CLISession() as s:
+        resp = s.call("render", pdf_b64=_b64(pdf), page=0, dpi=72)
+    # A clean response decode is itself proof that stdout wasn't contaminated:
+    # ``CLISession.call`` reads a length prefix and exact payload, and would
+    # raise on a mismatch. Assert the response shape and PNG signature too.
+    assert resp["ok"] is True
+    png = base64.b64decode(resp["result"]["png_b64"])
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_render_routes_mupdf_warning_text_to_stderr():
+    """Positive observability check: the warning is preserved on stderr.
+
+    Drives the subprocess directly (rather than via ``CLISession``) so we
+    can read stderr at exit. Asserts the MuPDF warning text appears there,
+    proving observability is preserved while stdout stays clean.
+    """
+    pdf = _make_pdf_triggering_mupdf_warning()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "lexcloak_pdf_tool"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    cmd = {"op": "render", "pdf_b64": _b64(pdf),
+           "page": 0, "dpi": 72, "protocol_version": PROTOCOL_VERSION}
+    payload = json.dumps(cmd).encode("utf-8")
+    stdout, stderr = proc.communicate(
+        input=LENGTH_STRUCT.pack(len(payload)) + payload, timeout=30,
+    )
+    # Stdout: exactly one valid frame, header matches body length.
+    assert len(stdout) >= 4
+    body_len = LENGTH_STRUCT.unpack(stdout[:4])[0]
+    assert len(stdout) == 4 + body_len, (
+        "stdout contaminated — leaked bytes ahead of the length prefix; "
+        f"first 80 stdout bytes: {stdout[:80]!r}"
+    )
+    # Stderr: contains the MuPDF warning that the C library emitted.
+    stderr_text = stderr.decode("utf-8", errors="replace")
+    assert "MuPDF" in stderr_text, (
+        f"expected MuPDF warning on stderr, got: {stderr_text!r}"
+    )
 
 
 def test_extract_native_roundtrip():

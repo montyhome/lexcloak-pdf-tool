@@ -36,6 +36,21 @@ from lexcloak_pdf_tool import (
 )
 from lexcloak_pdf_tool.coords import deserialize_chardata, serialize_chardata
 
+# MuPDF's C library writes error/warning lines directly to fd 1 (stdout),
+# bypassing Python's sys.stdout. In a length-prefixed JSON IPC protocol
+# that is fatal: the parent reads the leaked bytes as the next frame's
+# length prefix and rejects the connection as oversized. Redirect MuPDF's
+# C-side messages to stderr -- the parent already tails stderr for
+# diagnostics, so observability is preserved. See tests/test_cli.py
+# (test_render_does_not_contaminate_stdout_with_mupdf_warnings) for the
+# end-to-end regression. Repro before the fix: a tagged PDF whose render
+# emits ``"MuPDF error: ...\n\n"`` on fd 1 ahead of the proper length
+# prefix; the parent reads ``M u P D`` (= 0x4D755044 = 1,299,533,892)
+# as the frame size and aborts.
+import fitz as _fitz
+
+_fitz.set_messages(stream=sys.stderr)
+
 
 # Protocol constants -- see docs/PROTOCOL.md.
 PROTOCOL_VERSION = 2
