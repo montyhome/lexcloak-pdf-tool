@@ -21,6 +21,7 @@ import fitz
 import pytest
 
 from lexcloak_pdf_tool import (
+    all_page_sizes,
     apply_redactions,
     extract_text_native,
     is_encrypted,
@@ -103,6 +104,71 @@ def test_page_size_out_of_range_raises():
 def test_page_size_negative_page_raises():
     with pytest.raises(IndexError):
         page_size(_make_pdf(), -1)
+
+
+# ── all_page_sizes ───────────────────────────────────────────────────
+
+
+def test_all_page_sizes_single_page():
+    sizes = all_page_sizes(_make_pdf(n_pages=1))
+    assert len(sizes) == 1
+    w, h = sizes[0]
+    assert w == pytest.approx(612.0)
+    assert h == pytest.approx(792.0)
+
+
+def test_all_page_sizes_multi_page_uniform_dims():
+    sizes = all_page_sizes(_make_pdf(n_pages=5))
+    assert len(sizes) == 5
+    for w, h in sizes:
+        assert w == pytest.approx(612.0)
+        assert h == pytest.approx(792.0)
+
+
+def test_all_page_sizes_mixed_dimensions():
+    """Pages with different dimensions surface accurately."""
+    doc = fitz.open()
+    doc.new_page(width=612, height=792)   # US Letter
+    doc.new_page(width=595, height=842)   # A4
+    doc.new_page(width=792, height=612)   # Letter landscape
+    pdf = doc.tobytes()
+    doc.close()
+    sizes = all_page_sizes(pdf)
+    assert len(sizes) == 3
+    assert sizes[0][0] == pytest.approx(612.0)
+    assert sizes[0][1] == pytest.approx(792.0)
+    assert sizes[1][0] == pytest.approx(595.0)
+    assert sizes[1][1] == pytest.approx(842.0)
+    assert sizes[2][0] == pytest.approx(792.0)
+    assert sizes[2][1] == pytest.approx(612.0)
+
+
+def test_all_page_sizes_matches_per_page_page_size():
+    """Behavioral equivalence with N sequential page_size calls — load-bearing
+    for the engine-side fallback path when an old subprocess lacks the op."""
+    pdf = _make_pdf(n_pages=4)
+    batch = all_page_sizes(pdf)
+    sequential = [page_size(pdf, i) for i in range(4)]
+    assert batch == sequential
+
+
+def test_all_page_sizes_corrupt_pdf_raises():
+    """Fail-fast on bad input, matching the rest of the library API."""
+    with pytest.raises(Exception):  # noqa: B017 -- PyMuPDF raises various
+        all_page_sizes(b"not a pdf")
+
+
+def test_all_page_sizes_empty_pw_encrypted_pdf_passthrough():
+    """PyMuPDF auto-authenticates empty-password PDFs, so all_page_sizes
+    succeeds with the same dims a plaintext doc would return."""
+    doc = fitz.open()
+    doc.new_page(width=612, height=792)
+    pdf = doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw="", user_pw="")
+    doc.close()
+    sizes = all_page_sizes(pdf)
+    assert len(sizes) == 1
+    assert sizes[0][0] == pytest.approx(612.0)
+    assert sizes[0][1] == pytest.approx(792.0)
 
 
 def test_is_encrypted_plaintext_pdf():

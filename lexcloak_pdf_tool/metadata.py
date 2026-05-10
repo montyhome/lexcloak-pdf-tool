@@ -31,6 +31,25 @@ def page_size(pdf_bytes: bytes, page_num: int) -> tuple[float, float]:
         doc.close()
 
 
+def all_page_sizes(pdf_bytes: bytes) -> list[tuple[float, float]]:
+    """Return ``[(width, height), ...]`` for every page in PDF point-space (72 DPI).
+
+    Batch counterpart to :func:`page_size`. Opens the document once,
+    iterates every page, returns the list. Replaces N sequential
+    ``page_size(pdf_bytes, i)`` calls — load-bearing on long docs where
+    the IPC re-shoveling cost of repeated full-PDF transfers dominates
+    the actual page-size lookup.
+    """
+    doc = open_pdf(pdf_bytes)
+    try:
+        return [
+            (float(doc[i].rect.width), float(doc[i].rect.height))
+            for i in range(len(doc))
+        ]
+    finally:
+        doc.close()
+
+
 def is_encrypted(pdf_bytes: bytes) -> bool:
     """Return True if the PDF needs a non-empty password to read.
 

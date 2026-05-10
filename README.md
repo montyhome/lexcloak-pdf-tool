@@ -14,7 +14,7 @@ A subprocess CLI that wraps a narrow set of PyMuPDF operations:
 - Search for text on a page (substring, whole-word, or head/tail split).
 - Apply content-stream redactions (black-box matches, optional re-encryption).
 - Strip metadata and XMP.
-- Page count, page size, encryption-state probes.
+- Page count, single-page size, batch all-page sizes, encryption-state probes.
 - Authenticate password-protected PDFs.
 
 Built around the specific call patterns Lex Cloak needs -- **not a
@@ -51,7 +51,7 @@ repository and extend the CLI's op set under the AGPL v3.
 ## Install from GitHub
 
 ```
-pip install git+https://github.com/montyhome/lexcloak-pdf-tool@v0.2.0
+pip install git+https://github.com/montyhome/lexcloak-pdf-tool@v0.3.0
 ```
 
 PyPI publish is deferred until the package stabilizes.
