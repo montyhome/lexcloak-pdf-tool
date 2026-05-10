@@ -14,6 +14,29 @@ _MAX_OCR_LINE_H = 30.0
 # ── IPC-clean API ────────────────────────────────────────────────────
 
 
+def _extract_text_native_doc(doc, page_num: int) -> list[dict]:
+    if page_num < 0 or page_num >= len(doc):
+        raise IndexError(
+            f"page_num {page_num} out of range for {len(doc)}-page document"
+        )
+    page = doc[page_num]
+    words: list[dict] = []
+    for x0, y0, x1, y1, text, block_no, line_no, word_no in page.get_text("words"):
+        if not text.strip():
+            continue
+        words.append({
+            "text": text,
+            "x0": float(x0),
+            "y0": float(y0),
+            "x1": float(x1),
+            "y1": float(y1),
+            "block": int(block_no),
+            "line": int(line_no),
+            "word": int(word_no),
+        })
+    return words
+
+
 def extract_text_native(pdf_bytes: bytes, page_num: int) -> list[dict]:
     """Return native PDF text words + bboxes for ``page_num``.
 
@@ -29,28 +52,28 @@ def extract_text_native(pdf_bytes: bytes, page_num: int) -> list[dict]:
     """
     doc = open_pdf(pdf_bytes)
     try:
-        if page_num < 0 or page_num >= len(doc):
-            raise IndexError(
-                f"page_num {page_num} out of range for {len(doc)}-page document"
-            )
-        page = doc[page_num]
-        words: list[dict] = []
-        for x0, y0, x1, y1, text, block_no, line_no, word_no in page.get_text("words"):
-            if not text.strip():
-                continue
-            words.append({
-                "text": text,
-                "x0": float(x0),
-                "y0": float(y0),
-                "x1": float(x1),
-                "y1": float(y1),
-                "block": int(block_no),
-                "line": int(line_no),
-                "word": int(word_no),
-            })
-        return words
+        return _extract_text_native_doc(doc, page_num)
     finally:
         doc.close()
+
+
+def _extract_text_ocr_doc(doc, page_num: int,
+                          tessdata_path: str | None = None,
+                          psm: int = 3) -> dict | None:
+    from .ocr import OCR_DPI, _ocr_png_to_dict
+
+    if page_num < 0 or page_num >= len(doc):
+        raise IndexError(
+            f"page_num {page_num} out of range for {len(doc)}-page document"
+        )
+    page = doc[page_num]
+    try:
+        pix = page.get_pixmap(dpi=OCR_DPI)
+        png_bytes = pix.tobytes("png")
+    except Exception:
+        return None
+    _ = tessdata_path  # advisory -- _ocr_png_to_dict uses module-level path
+    return _ocr_png_to_dict(png_bytes, dpi=OCR_DPI, psm=psm)
 
 
 def extract_text_ocr(pdf_bytes: bytes, page_num: int,
@@ -67,26 +90,26 @@ def extract_text_ocr(pdf_bytes: bytes, page_num: int,
     ``psm=3`` (auto page segmentation) is the default and correctly
     handles forms, tables, sidebars, captions, and multi-column layouts.
     """
-    from .ocr import OCR_DPI, _ocr_png_to_dict
-
     doc = open_pdf(pdf_bytes)
     try:
-        if page_num < 0 or page_num >= len(doc):
-            raise IndexError(
-                f"page_num {page_num} out of range for {len(doc)}-page document"
-            )
-        page = doc[page_num]
-        try:
-            pix = page.get_pixmap(dpi=OCR_DPI)
-            png_bytes = pix.tobytes("png")
-        except Exception:
-            return None
-        # ``tessdata_path`` is currently advisory -- ``_ocr_png_to_dict``
-        # uses the module-level ``TESSDATA_PATH`` resolved at load time.
-        _ = tessdata_path
-        return _ocr_png_to_dict(png_bytes, dpi=OCR_DPI, psm=psm)
+        return _extract_text_ocr_doc(doc, page_num,
+                                     tessdata_path=tessdata_path, psm=psm)
     finally:
         doc.close()
+
+
+def _extract_text_dict_doc(doc, page_num: int) -> list[dict]:
+    if page_num < 0 or page_num >= len(doc):
+        raise IndexError(
+            f"page_num {page_num} out of range for {len(doc)}-page document"
+        )
+    page = doc[page_num]
+    page_dict = page.get_text("dict")
+    blocks = page_dict.get("blocks", [])
+    for block in blocks:
+        if block.get("type") == 1 and "image" in block:
+            del block["image"]
+    return blocks
 
 
 def extract_text_dict(pdf_bytes: bytes, page_num: int) -> list[dict]:
@@ -109,20 +132,17 @@ def extract_text_dict(pdf_bytes: bytes, page_num: int) -> list[dict]:
     """
     doc = open_pdf(pdf_bytes)
     try:
-        if page_num < 0 or page_num >= len(doc):
-            raise IndexError(
-                f"page_num {page_num} out of range for {len(doc)}-page document"
-            )
-        page = doc[page_num]
-        page_dict = page.get_text("dict")
-        blocks = page_dict.get("blocks", [])
-        for block in blocks:
-            if block.get("type") == 1 and "image" in block:
-                # Strip image binary -- callers never read it from this op.
-                del block["image"]
-        return blocks
+        return _extract_text_dict_doc(doc, page_num)
     finally:
         doc.close()
+
+
+def _extract_text_plain_doc(doc, page_num: int) -> str:
+    if page_num < 0 or page_num >= len(doc):
+        raise IndexError(
+            f"page_num {page_num} out of range for {len(doc)}-page document"
+        )
+    return doc[page_num].get_text()
 
 
 def extract_text_plain(pdf_bytes: bytes, page_num: int) -> str:
@@ -132,13 +152,37 @@ def extract_text_plain(pdf_bytes: bytes, page_num: int) -> str:
     """
     doc = open_pdf(pdf_bytes)
     try:
-        if page_num < 0 or page_num >= len(doc):
-            raise IndexError(
-                f"page_num {page_num} out of range for {len(doc)}-page document"
-            )
-        return doc[page_num].get_text()
+        return _extract_text_plain_doc(doc, page_num)
     finally:
         doc.close()
+
+
+def _search_for_doc(doc, page_num: int, needle: str,
+                    ocr_chardata: list | None = None,
+                    whole_word: bool = False,
+                    split: bool = False) -> list:
+    from .coords import (search_in_chars,
+                         search_whole_word_in_chars,
+                         split_search_in_chars)
+
+    if ocr_chardata:
+        if split:
+            return split_search_in_chars(needle, ocr_chardata)
+        if whole_word:
+            return search_whole_word_in_chars(needle, ocr_chardata)
+        return search_in_chars(needle, ocr_chardata)
+
+    if page_num < 0 or page_num >= len(doc):
+        raise IndexError(
+            f"page_num {page_num} out of range for {len(doc)}-page document"
+        )
+    page = doc[page_num]
+    if split:
+        return _split_search(page, needle, None)
+    if whole_word:
+        return _page_search_whole_word(page, needle, None)
+    rects = page.search_for(needle)
+    return _cap_rects(rects) if rects else []
 
 
 def search_for(pdf_bytes: bytes, page_num: int, needle: str,
@@ -164,30 +208,16 @@ def search_for(pdf_bytes: bytes, page_num: int, needle: str,
     Returns ``list[Rect]`` for in-process callers; the CLI op serializes
     these to flat tuples on the wire.
     """
-    from .coords import (search_in_chars,
-                         search_whole_word_in_chars,
-                         split_search_in_chars)
-
     if ocr_chardata:
-        if split:
-            return split_search_in_chars(needle, ocr_chardata)
-        if whole_word:
-            return search_whole_word_in_chars(needle, ocr_chardata)
-        return search_in_chars(needle, ocr_chardata)
+        return _search_for_doc(None, page_num, needle,
+                               ocr_chardata=ocr_chardata,
+                               whole_word=whole_word, split=split)
 
     doc = open_pdf(pdf_bytes)
     try:
-        if page_num < 0 or page_num >= len(doc):
-            raise IndexError(
-                f"page_num {page_num} out of range for {len(doc)}-page document"
-            )
-        page = doc[page_num]
-        if split:
-            return _split_search(page, needle, None)
-        if whole_word:
-            return _page_search_whole_word(page, needle, None)
-        rects = page.search_for(needle)
-        return _cap_rects(rects) if rects else []
+        return _search_for_doc(doc, page_num, needle,
+                               ocr_chardata=None,
+                               whole_word=whole_word, split=split)
     finally:
         doc.close()
 

@@ -20,6 +20,23 @@ A subprocess CLI that wraps a narrow set of PyMuPDF operations:
 Built around the specific call patterns Lex Cloak needs -- **not a
 general-purpose PyMuPDF library**.
 
+### Wire-protocol modes
+
+The CLI speaks two protocol modes against the same socket:
+
+* **Stateless (v2/v3)** — every op carries the full PDF in `pdf_b64`. The
+  subprocess re-parses on each call. Simple, no shared state. Default for
+  callers that talk to v0.3.0-and-earlier subprocesses.
+* **Stateful handle protocol (v4+)** — `open_doc(pdf_b64)` parses once and
+  returns a UUID handle. Per-page ops take `handle` instead of `pdf_b64`.
+  `close_doc(handle)` releases the cached doc. Subprocess holds parsed
+  `fitz.Document` instances keyed by handle, capped via LRU eviction.
+  Eliminates per-call PDF re-shoveling on the wire — load-bearing for
+  long documents where the IPC payload dominates the actual op cost.
+
+Both modes are served by the same subprocess; v4 is purely additive over
+v2/v3. Older clients keep working unchanged against a v4 server.
+
 ## Why public and AGPL
 
 PyMuPDF (and the underlying MuPDF) are dual-licensed: GNU AGPL v3 or a paid
@@ -51,7 +68,7 @@ repository and extend the CLI's op set under the AGPL v3.
 ## Install from GitHub
 
 ```
-pip install git+https://github.com/montyhome/lexcloak-pdf-tool@v0.3.0
+pip install git+https://github.com/montyhome/lexcloak-pdf-tool@v0.4.0
 ```
 
 PyPI publish is deferred until the package stabilizes.

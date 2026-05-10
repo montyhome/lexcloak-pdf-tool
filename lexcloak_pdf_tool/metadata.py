@@ -2,33 +2,53 @@
 
 Cheap inspection ops for callers that need page count, page size, or
 encryption state without touching the document body.
+
+Each public ``<func>(pdf_bytes, ...)`` opens a fresh ``fitz.Document``,
+calls the matching ``_<func>_doc(doc, ...)`` helper, then closes. The
+``_doc`` helpers are also reused by the CLI's stateful handle protocol
+(v0.4.0+) where the document is held open across multiple ops.
 """
 from __future__ import annotations
 
 from .redact import open_pdf
 
 
+def _page_count_doc(doc) -> int:
+    return len(doc)
+
+
 def page_count(pdf_bytes: bytes) -> int:
     """Return the number of pages in ``pdf_bytes``."""
     doc = open_pdf(pdf_bytes)
     try:
-        return len(doc)
+        return _page_count_doc(doc)
     finally:
         doc.close()
+
+
+def _page_size_doc(doc, page_num: int) -> tuple[float, float]:
+    if page_num < 0 or page_num >= len(doc):
+        raise IndexError(
+            f"page_num {page_num} out of range for {len(doc)}-page document"
+        )
+    rect = doc[page_num].rect
+    return float(rect.width), float(rect.height)
 
 
 def page_size(pdf_bytes: bytes, page_num: int) -> tuple[float, float]:
     """Return ``(width, height)`` of ``page_num`` in PDF point-space (72 DPI)."""
     doc = open_pdf(pdf_bytes)
     try:
-        if page_num < 0 or page_num >= len(doc):
-            raise IndexError(
-                f"page_num {page_num} out of range for {len(doc)}-page document"
-            )
-        rect = doc[page_num].rect
-        return float(rect.width), float(rect.height)
+        return _page_size_doc(doc, page_num)
     finally:
         doc.close()
+
+
+def _all_page_sizes_doc(doc) -> list[tuple[float, float]]:
+    return [
+        (float(doc[i].rect.width), float(doc[i].rect.height))
+        for i in range(len(doc))
+    ]
 
 
 def all_page_sizes(pdf_bytes: bytes) -> list[tuple[float, float]]:
@@ -42,12 +62,13 @@ def all_page_sizes(pdf_bytes: bytes) -> list[tuple[float, float]]:
     """
     doc = open_pdf(pdf_bytes)
     try:
-        return [
-            (float(doc[i].rect.width), float(doc[i].rect.height))
-            for i in range(len(doc))
-        ]
+        return _all_page_sizes_doc(doc)
     finally:
         doc.close()
+
+
+def _is_encrypted_doc(doc) -> bool:
+    return bool(doc.is_encrypted and doc.needs_pass)
 
 
 def is_encrypted(pdf_bytes: bytes) -> bool:
@@ -60,9 +81,16 @@ def is_encrypted(pdf_bytes: bytes) -> bool:
     """
     doc = open_pdf(pdf_bytes)
     try:
-        return bool(doc.is_encrypted and doc.needs_pass)
+        return _is_encrypted_doc(doc)
     finally:
         doc.close()
+
+
+def _get_metadata_doc(doc) -> dict:
+    meta = doc.metadata or {}
+    has_xmp = bool(doc.get_xml_metadata())
+    fields = {k: str(v) for k, v in meta.items() if v is not None and v != ""}
+    return {"metadata": fields, "has_xmp": has_xmp}
 
 
 def get_metadata(pdf_bytes: bytes) -> dict:
@@ -76,9 +104,6 @@ def get_metadata(pdf_bytes: bytes) -> dict:
     """
     doc = open_pdf(pdf_bytes)
     try:
-        meta = doc.metadata or {}
-        has_xmp = bool(doc.get_xml_metadata())
+        return _get_metadata_doc(doc)
     finally:
         doc.close()
-    fields = {k: str(v) for k, v in meta.items() if v is not None and v != ""}
-    return {"metadata": fields, "has_xmp": has_xmp}

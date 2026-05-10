@@ -117,6 +117,107 @@ def strip_metadata(pdf_bytes_or_doc):
     return None
 
 
+def _apply_redactions_doc(doc, matches: list[dict],
+                          redact_label: str = "",
+                          active_categories: list[str] | set[str] | None = None,
+                          removed_pages: list[int] | None = None,
+                          *,
+                          output_protection: dict | None = None
+                          ) -> tuple[bytes, bool]:
+    """Apply redactions to an open ``fitz.Document`` and return (bytes, protected).
+
+    Mutates ``doc`` in place: redaction annotations are applied, requested
+    pages are deleted, metadata is stripped. Caller owns ``doc`` lifecycle —
+    this helper does NOT close it. Used by both the bytes-IPC entry point
+    and the v0.4.0 stateful handle protocol.
+    """
+    _validate_redaction_payload(matches, removed_pages)
+
+    removed_set = set(removed_pages) if removed_pages else set()
+    active_set = set(active_categories) if active_categories else None
+    by_page: dict[int, list[dict]] = {}
+    for m in matches:
+        if not m.get("enabled", True):
+            continue
+        if m["page"] in removed_set:
+            continue
+        if active_set is not None and m.get("type") not in active_set:
+            if m.get("type") not in ("Manual Region", "Custom"):
+                continue
+        by_page.setdefault(m["page"], []).append(m)
+
+    for pg_num, pg_matches in by_page.items():
+        page = doc[pg_num]
+        for m in pg_matches:
+            r = m["rect"]
+            rect = Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+            box_h = rect.height
+            font_size = min(11, max(5, box_h * 0.7))
+            if redact_label:
+                page.add_redact_annot(
+                    rect,
+                    text=redact_label,
+                    fontname="helv",
+                    fontsize=font_size,
+                    text_color=(1, 1, 1),
+                    fill=(0, 0, 0),
+                    align=TEXT_ALIGN_CENTER,
+                )
+            else:
+                page.add_redact_annot(rect, fill=(0, 0, 0))
+        page.apply_redactions()
+
+    if removed_set:
+        valid_removed = {p for p in removed_set if 0 <= p < len(doc)}
+        if valid_removed and len(valid_removed) >= len(doc):
+            raise ValueError("Cannot export: all pages have been removed")
+        for pg_num in sorted(valid_removed, reverse=True):
+            doc.delete_page(pg_num)
+
+    _strip_metadata_doc(doc)
+
+    buf = io.BytesIO()
+    mode = (output_protection or {}).get("mode") if output_protection else None
+
+    if output_protection is None or mode == "none":
+        doc.save(buf, garbage=4, deflate=True, clean=True)
+        protection_applied = True
+    elif mode in ("same", "new"):
+        password = output_protection.get("password") or ""
+        if not password:
+            doc.save(buf, garbage=4, deflate=True, clean=True)
+            protection_applied = False
+        else:
+            try:
+                doc.save(
+                    buf,
+                    garbage=4,
+                    deflate=True,
+                    clean=True,
+                    encryption=PDF_ENCRYPT_AES_256,
+                    user_pw=password,
+                    owner_pw=password,
+                    permissions=int(PDF_PERM_ACCESSIBILITY),
+                )
+                protection_applied = True
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Re-encryption failed; saving unprotected. exception_type=%s",
+                    type(exc).__name__,
+                )
+                buf = io.BytesIO()
+                doc.save(buf, garbage=4, deflate=True, clean=True)
+                protection_applied = False
+    else:
+        logging.getLogger(__name__).warning(
+            "apply_redactions: unknown output_protection mode; saving unprotected."
+        )
+        doc.save(buf, garbage=4, deflate=True, clean=True)
+        protection_applied = False
+
+    return buf.getvalue(), protection_applied
+
+
 def apply_redactions(pdf_bytes: bytes, matches: list[dict],
                      redact_label: str = "",
                      active_categories: list[str] | set[str] | None = None,
@@ -167,91 +268,14 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
         On malformed wire payload (bad page index, non-numeric rect coords,
         inverted bounds).
     """
-    _validate_redaction_payload(matches, removed_pages)
-
     doc = open_pdf(pdf_bytes)
-    removed_set = set(removed_pages) if removed_pages else set()
-    active_set = set(active_categories) if active_categories else None
-    by_page: dict[int, list[dict]] = {}
-    for m in matches:
-        if not m.get("enabled", True):
-            continue
-        if m["page"] in removed_set:
-            continue
-        if active_set is not None and m.get("type") not in active_set:
-            if m.get("type") not in ("Manual Region", "Custom"):
-                continue
-        by_page.setdefault(m["page"], []).append(m)
-
-    for pg_num, pg_matches in by_page.items():
-        page = doc[pg_num]
-        for m in pg_matches:
-            r = m["rect"]
-            rect = Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-            box_h = rect.height
-            font_size = min(11, max(5, box_h * 0.7))
-            if redact_label:
-                page.add_redact_annot(
-                    rect,
-                    text=redact_label,
-                    fontname="helv",
-                    fontsize=font_size,
-                    text_color=(1, 1, 1),
-                    fill=(0, 0, 0),
-                    align=TEXT_ALIGN_CENTER,
-                )
-            else:
-                page.add_redact_annot(rect, fill=(0, 0, 0))
-        page.apply_redactions()
-
-    if removed_set:
-        valid_removed = {p for p in removed_set if 0 <= p < len(doc)}
-        if valid_removed and len(valid_removed) >= len(doc):
-            doc.close()
-            raise ValueError("Cannot export: all pages have been removed")
-        for pg_num in sorted(valid_removed, reverse=True):
-            doc.delete_page(pg_num)
-
-    _strip_metadata_doc(doc)
-
-    buf = io.BytesIO()
-    mode = (output_protection or {}).get("mode") if output_protection else None
-
-    if output_protection is None or mode == "none":
-        doc.save(buf, garbage=4, deflate=True, clean=True)
-        protection_applied = True
-    elif mode in ("same", "new"):
-        password = output_protection.get("password") or ""
-        if not password:
-            doc.save(buf, garbage=4, deflate=True, clean=True)
-            protection_applied = False
-        else:
-            try:
-                doc.save(
-                    buf,
-                    garbage=4,
-                    deflate=True,
-                    clean=True,
-                    encryption=PDF_ENCRYPT_AES_256,
-                    user_pw=password,
-                    owner_pw=password,
-                    permissions=int(PDF_PERM_ACCESSIBILITY),
-                )
-                protection_applied = True
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "Re-encryption failed; saving unprotected. exception_type=%s",
-                    type(exc).__name__,
-                )
-                buf = io.BytesIO()
-                doc.save(buf, garbage=4, deflate=True, clean=True)
-                protection_applied = False
-    else:
-        logging.getLogger(__name__).warning(
-            "apply_redactions: unknown output_protection mode; saving unprotected."
+    try:
+        return _apply_redactions_doc(
+            doc, matches,
+            redact_label=redact_label,
+            active_categories=active_categories,
+            removed_pages=removed_pages,
+            output_protection=output_protection,
         )
-        doc.save(buf, garbage=4, deflate=True, clean=True)
-        protection_applied = False
-
-    doc.close()
-    return buf.getvalue(), protection_applied
+    finally:
+        doc.close()

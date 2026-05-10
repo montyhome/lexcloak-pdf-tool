@@ -23,7 +23,7 @@ import fitz
 import pytest
 
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 LENGTH_STRUCT = struct.Struct(">I")
 
 
@@ -351,7 +351,7 @@ def test_startup_line_emitted_on_stderr():
     code, stderr = s.close()
     text = stderr.decode("utf-8", errors="replace")
     assert "lexcloak_pdf_tool starting" in text
-    assert "protocol_version=3" in text
+    assert "protocol_version=4" in text
     assert "pymupdf_version=" in text
 
 
@@ -388,7 +388,7 @@ def test_unknown_op_returns_structured_error():
 
 
 def test_protocol_version_v1_rejected():
-    """v1-declared client frames are rejected: supported set is {2, 3}."""
+    """v1-declared client frames are rejected: supported set is {2, 3, 4}."""
     with CLISession() as s:
         s.write_frame({"protocol_version": 1, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf())})
@@ -397,10 +397,10 @@ def test_protocol_version_v1_rejected():
     assert resp["error_type"] == "ProtocolVersionMismatch"
 
 
-def test_protocol_version_v4_rejected():
+def test_protocol_version_v5_rejected():
     """Future versions outside the supported set are rejected."""
     with CLISession() as s:
-        s.write_frame({"protocol_version": 4, "op": "page_count",
+        s.write_frame({"protocol_version": 5, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf())})
         resp = s.read_frame()
     assert resp["ok"] is False
@@ -408,9 +408,19 @@ def test_protocol_version_v4_rejected():
 
 
 def test_protocol_version_v2_still_accepted():
-    """v2 clients keep working against a v3 subprocess (backward compat)."""
+    """v2 clients keep working against a v4 subprocess (backward compat)."""
     with CLISession() as s:
         s.write_frame({"protocol_version": 2, "op": "page_count",
+                       "pdf_b64": _b64(_make_pdf(n_pages=2))})
+        resp = s.read_frame()
+    assert resp["ok"] is True
+    assert resp["result"]["count"] == 2
+
+
+def test_protocol_version_v3_still_accepted():
+    """v3 clients (Session 291) keep working against a v4 subprocess."""
+    with CLISession() as s:
+        s.write_frame({"protocol_version": 3, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf(n_pages=2))})
         resp = s.read_frame()
     assert resp["ok"] is True
@@ -729,3 +739,295 @@ def test_serialize_chardata_round_trip_through_cli():
                              ocr_chardata=chardata)
     assert search_resp["ok"] is True
     assert isinstance(search_resp["result"]["rects"], list)
+
+
+# ── Stateful handle protocol (v4) ──────────────────────────────────
+
+
+def _open(s: CLISession, pdf: bytes) -> str:
+    """Open ``pdf`` in the subprocess and return the assigned handle."""
+    resp = s.call("open_doc", pdf_b64=_b64(pdf))
+    assert resp["ok"] is True, resp
+    handle = resp["result"]["handle"]
+    assert isinstance(handle, str) and len(handle) > 0
+    return handle
+
+
+def test_open_doc_returns_uuid_handle():
+    with CLISession() as s:
+        handle = _open(s, _make_pdf())
+    # UUID4 string: 8-4-4-4-12 hex characters
+    assert len(handle) == 36
+    assert handle.count("-") == 4
+
+
+def test_close_doc_returns_closed_true_for_known_handle():
+    with CLISession() as s:
+        handle = _open(s, _make_pdf())
+        resp = s.call("close_doc", handle=handle)
+    assert resp["ok"] is True
+    assert resp["result"]["closed"] is True
+
+
+def test_double_close_is_idempotent():
+    """Second close on the same handle returns closed=False (already gone)."""
+    with CLISession() as s:
+        handle = _open(s, _make_pdf())
+        first = s.call("close_doc", handle=handle)
+        second = s.call("close_doc", handle=handle)
+    assert first["ok"] is True
+    assert first["result"]["closed"] is True
+    assert second["ok"] is True
+    assert second["result"]["closed"] is False
+
+
+def test_close_unknown_handle_returns_closed_false():
+    with CLISession() as s:
+        resp = s.call("close_doc", handle="not-a-real-handle")
+    assert resp["ok"] is True
+    assert resp["result"]["closed"] is False
+
+
+def test_handle_op_after_close_raises_handle_not_found():
+    with CLISession() as s:
+        handle = _open(s, _make_pdf())
+        s.call("close_doc", handle=handle)
+        resp = s.call("page_count_h", handle=handle)
+    assert resp["ok"] is False
+    assert resp["error_type"] == "HandleNotFound"
+
+
+def test_handle_op_with_unknown_handle_raises():
+    with CLISession() as s:
+        resp = s.call("page_count_h", handle="00000000-0000-0000-0000-000000000000")
+    assert resp["ok"] is False
+    assert resp["error_type"] == "HandleNotFound"
+
+
+def test_handle_op_with_missing_handle_field_raises():
+    with CLISession() as s:
+        resp = s.call("page_count_h")  # no handle kwarg
+    assert resp["ok"] is False
+    assert resp["error_type"] == "HandleNotFound"
+
+
+def test_handle_op_with_non_string_handle_raises():
+    with CLISession() as s:
+        resp = s.call("page_count_h", handle=12345)
+    assert resp["ok"] is False
+    assert resp["error_type"] == "HandleNotFound"
+
+
+def test_page_count_h_matches_stateless():
+    pdf = _make_pdf(n_pages=5)
+    with CLISession() as s:
+        stateless = s.call("page_count", pdf_b64=_b64(pdf))
+        handle = _open(s, pdf)
+        handle_resp = s.call("page_count_h", handle=handle)
+    assert stateless["result"]["count"] == handle_resp["result"]["count"] == 5
+
+
+def test_page_size_h_matches_stateless():
+    pdf = _make_pdf()
+    with CLISession() as s:
+        stateless = s.call("page_size", pdf_b64=_b64(pdf), page=0)
+        handle = _open(s, pdf)
+        handle_resp = s.call("page_size_h", handle=handle, page=0)
+    assert stateless["result"] == handle_resp["result"]
+
+
+def test_all_page_sizes_h_matches_stateless():
+    pdf = _make_pdf(n_pages=3)
+    with CLISession() as s:
+        stateless = s.call("all_page_sizes", pdf_b64=_b64(pdf))
+        handle = _open(s, pdf)
+        handle_resp = s.call("all_page_sizes_h", handle=handle)
+    assert stateless["result"] == handle_resp["result"]
+
+
+def test_render_h_matches_stateless():
+    pdf = _make_pdf()
+    with CLISession() as s:
+        stateless = s.call("render", pdf_b64=_b64(pdf), page=0, dpi=120)
+        handle = _open(s, pdf)
+        handle_resp = s.call("render_h", handle=handle, page=0, dpi=120)
+    # Bytes are deterministic for a given PDF + DPI under PyMuPDF
+    assert stateless["result"]["png_b64"] == handle_resp["result"]["png_b64"]
+
+
+def test_extract_text_dict_h_matches_stateless():
+    pdf = _make_pdf("Important text", n_pages=2)
+    with CLISession() as s:
+        stateless = s.call("extract_text_dict", pdf_b64=_b64(pdf), page=1)
+        handle = _open(s, pdf)
+        handle_resp = s.call("extract_text_dict_h", handle=handle, page=1)
+    assert stateless["result"] == handle_resp["result"]
+
+
+def test_extract_text_plain_h_matches_stateless():
+    pdf = _make_pdf("Some text content")
+    with CLISession() as s:
+        stateless = s.call("extract_text_plain", pdf_b64=_b64(pdf), page=0)
+        handle = _open(s, pdf)
+        handle_resp = s.call("extract_text_plain_h", handle=handle, page=0)
+    assert stateless["result"] == handle_resp["result"]
+
+
+def test_extract_native_h_matches_stateless():
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    with CLISession() as s:
+        stateless = s.call("extract_native", pdf_b64=_b64(pdf), page=0)
+        handle = _open(s, pdf)
+        handle_resp = s.call("extract_native_h", handle=handle, page=0)
+    assert stateless["result"] == handle_resp["result"]
+
+
+def test_search_for_h_matches_stateless():
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    with CLISession() as s:
+        stateless = s.call("search_for", pdf_b64=_b64(pdf), page=0,
+                           needle="SSN")
+        handle = _open(s, pdf)
+        handle_resp = s.call("search_for_h", handle=handle, page=0,
+                             needle="SSN")
+    assert stateless["result"]["rects"] == handle_resp["result"]["rects"]
+    assert len(stateless["result"]["rects"]) >= 1
+
+
+def test_get_metadata_h_matches_stateless():
+    pdf = _make_pdf()
+    with CLISession() as s:
+        stateless = s.call("get_metadata", pdf_b64=_b64(pdf))
+        handle = _open(s, pdf)
+        handle_resp = s.call("get_metadata_h", handle=handle)
+    assert stateless["result"] == handle_resp["result"]
+
+
+def test_is_encrypted_h_returns_false_on_plaintext():
+    with CLISession() as s:
+        handle = _open(s, _make_pdf())
+        resp = s.call("is_encrypted_h", handle=handle)
+    assert resp["ok"] is True
+    assert resp["result"]["encrypted"] is False
+
+
+def test_is_encrypted_h_returns_true_on_real_password_pdf():
+    """Opening a password-protected PDF should still produce a handle.
+
+    PyMuPDF's ``fitz.open`` accepts encrypted docs without authenticating;
+    operations on the doc fail until ``authenticate(password)`` runs. The
+    handle protocol surfaces this state via ``is_encrypted_h`` so the
+    closed app can prompt for password before attempting per-page reads.
+    Reuses the existing ``_make_encrypted_pdf`` helper from the decrypt
+    test section.
+    """
+    encrypted_pdf = _make_encrypted_pdf("secret123")
+    with CLISession() as s:
+        handle = _open(s, encrypted_pdf)
+        resp = s.call("is_encrypted_h", handle=handle)
+    assert resp["ok"] is True
+    assert resp["result"]["encrypted"] is True
+
+
+def test_apply_redactions_h_produces_redacted_output():
+    """Handle-based redaction produces a valid PDF whose target rect is blanked."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    matches = [{
+        "page": 0,
+        "rect": {"x0": 50.0, "y0": 90.0, "x1": 200.0, "y1": 110.0},
+        "enabled": True,
+        "type": "SSN",
+    }]
+    with CLISession() as s:
+        handle = _open(s, pdf)
+        resp = s.call("apply_redactions_h",
+                      handle=handle, matches=matches,
+                      active_categories=["SSN"])
+    assert resp["ok"] is True
+    assert resp["result"]["protection_applied"] is True
+    out_bytes = base64.b64decode(resp["result"]["pdf_b64"])
+    # Re-open the redacted PDF and verify the SSN text is gone from page 0
+    out_doc = fitz.open(stream=out_bytes, filetype="pdf")
+    try:
+        page_text = out_doc[0].get_text()
+        assert "123-45-6789" not in page_text
+    finally:
+        out_doc.close()
+
+
+def test_strip_metadata_h_produces_bytes():
+    pdf = _make_pdf()
+    with CLISession() as s:
+        handle = _open(s, pdf)
+        resp = s.call("strip_metadata_h", handle=handle)
+    assert resp["ok"] is True
+    out_b64 = resp["result"]["pdf_b64"]
+    out_bytes = base64.b64decode(out_b64)
+    # Re-open the stripped PDF and verify metadata is empty
+    out_doc = fitz.open(stream=out_bytes, filetype="pdf")
+    try:
+        meta = out_doc.metadata or {}
+        # Default fields stripped to empty strings; PyMuPDF may add format/encryption
+        assert not meta.get("author")
+        assert not meta.get("title")
+    finally:
+        out_doc.close()
+
+
+def test_multiple_handles_isolated():
+    """Two handles into two PDFs return their own page counts."""
+    pdf_a = _make_pdf(n_pages=3)
+    pdf_b = _make_pdf(n_pages=7)
+    with CLISession() as s:
+        h_a = _open(s, pdf_a)
+        h_b = _open(s, pdf_b)
+        count_a = s.call("page_count_h", handle=h_a)
+        count_b = s.call("page_count_h", handle=h_b)
+        # Close one; the other still works
+        s.call("close_doc", handle=h_a)
+        count_a_after = s.call("page_count_h", handle=h_a)
+        count_b_after = s.call("page_count_h", handle=h_b)
+    assert count_a["result"]["count"] == 3
+    assert count_b["result"]["count"] == 7
+    assert count_a_after["ok"] is False  # h_a closed
+    assert count_a_after["error_type"] == "HandleNotFound"
+    assert count_b_after["result"]["count"] == 7  # h_b unaffected
+
+
+def test_lru_eviction_oldest_dropped_when_cache_full():
+    """Open more than _DOC_CACHE_MAX_SIZE handles; the oldest is evicted."""
+    from lexcloak_pdf_tool.__main__ import _DOC_CACHE_MAX_SIZE
+    pdfs = [_make_pdf(f"doc-{i}") for i in range(_DOC_CACHE_MAX_SIZE + 2)]
+    with CLISession() as s:
+        handles = [_open(s, p) for p in pdfs]
+        # First handle should have been evicted (LRU)
+        oldest_resp = s.call("page_count_h", handle=handles[0])
+        # Most recent handles still resolve
+        newest_resp = s.call("page_count_h", handle=handles[-1])
+    assert oldest_resp["ok"] is False
+    assert oldest_resp["error_type"] == "HandleNotFound"
+    assert newest_resp["ok"] is True
+    assert newest_resp["result"]["count"] == 1
+
+
+def test_handle_protocol_uses_smaller_payload_than_stateless():
+    """The whole point of v4: handle ops carry tiny per-call payloads.
+
+    Doesn't measure latency (flaky); asserts the structural property that
+    a handle op's request frame is dramatically smaller than a stateless
+    op's request frame for the same logical call. Eyeballable from the
+    payload size alone.
+    """
+    pdf = _make_pdf(n_pages=10)
+    pdf_b64 = _b64(pdf)
+    stateless_payload = json.dumps({
+        "protocol_version": PROTOCOL_VERSION,
+        "op": "page_size", "pdf_b64": pdf_b64, "page": 0,
+    }).encode()
+    handle_payload = json.dumps({
+        "protocol_version": PROTOCOL_VERSION,
+        "op": "page_size_h", "handle": "x" * 36, "page": 0,
+    }).encode()
+    # Handle payload should be a small constant; stateless grows with PDF size.
+    assert len(handle_payload) < 200
+    assert len(stateless_payload) > 5 * len(handle_payload)
