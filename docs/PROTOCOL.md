@@ -1,9 +1,21 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.3.0 ships
-protocol version 3.** v2 stays in the supported set so a v3 subprocess
-serves a v2-declaring client cleanly during the rolling release.
+parent via length-prefixed JSON frames over stdin/stdout. **v0.4.0 ships
+protocol version 4.** v2 + v3 stay in the supported set so a v4 subprocess
+serves older clients cleanly during rolling closed-app upgrades.
+
+There are two protocol modes (the subprocess speaks both simultaneously):
+
+* **Stateless ops** (v2/v3 baseline) — every op carries `pdf_b64`. The
+  subprocess parses the PDF on each call. Simple, no shared state.
+* **Stateful handle ops** (v4+) — `open_doc(pdf_b64)` parses once and
+  returns a UUID handle. Per-page ops take `handle` instead of `pdf_b64`.
+  `close_doc(handle)` releases the parsed document. Subprocess holds
+  parsed `fitz.Document` instances keyed by handle, capped at 16 entries
+  via LRU eviction (oldest-evicted-first). Designed for callers that
+  perform many per-page reads on the same PDF — eliminates the
+  per-call IPC payload re-shoveling cost.
 
 ## Frame format
 
@@ -29,30 +41,30 @@ as a clean exit.
 
 ```json
 {
-  "protocol_version": 3,
-  "op": "render"
-       | "extract_native"
-       | "extract_ocr"
-       | "extract_text_dict"
-       | "extract_text_plain"
-       | "search_for"
-       | "apply_redactions"
-       | "strip_metadata"
-       | "page_count"
-       | "page_size"
-       | "all_page_sizes"
-       | "is_encrypted"
-       | "get_metadata"
-       | "decrypt"
+  "protocol_version": 4,
+  "op": "render" | "extract_native" | "extract_ocr"
+       | "extract_text_dict" | "extract_text_plain"
+       | "search_for" | "apply_redactions" | "strip_metadata"
+       | "page_count" | "page_size" | "all_page_sizes"
+       | "is_encrypted" | "get_metadata" | "decrypt"
+       | "open_doc" | "close_doc"
+       | "render_h" | "extract_native_h" | "extract_ocr_h"
+       | "extract_text_dict_h" | "extract_text_plain_h"
+       | "search_for_h" | "apply_redactions_h" | "strip_metadata_h"
+       | "page_count_h" | "page_size_h" | "all_page_sizes_h"
+       | "is_encrypted_h" | "get_metadata_h"
        | "exit",
   ...op-specific fields (see below)
 }
 ```
 
-`protocol_version` values outside the supported set (v0.3.0: `{2, 3}`)
-are rejected with `error_type: "ProtocolVersionMismatch"`. v2 acceptance
-is intentional backward compat for the rolling closed-app upgrade — the
-subprocess advertises 3 in its handshake but accepts 2 on the wire.
+`protocol_version` values outside the supported set (v0.4.0: `{2, 3, 4}`)
+are rejected with `error_type: "ProtocolVersionMismatch"`. v2 + v3
+acceptance is intentional backward compat for the rolling closed-app
+upgrade — the subprocess advertises 4 in its handshake but accepts 2/3
+on the wire. `decrypt` deliberately has no `_h` variant: decryption
+always operates on raw bytes (returns cleartext), and the caller's
+handle-based workflow opens a fresh handle on the cleartext result.
 
 ## Response schema
 
@@ -296,6 +308,61 @@ Unencrypted input is re-saved cleanly with the password ignored
 
 Terminates the subprocess cleanly. No response frame.
 
+## Stateful handle ops (v4+)
+
+Each `_h` op takes a `handle` field (UUID4 string from a prior `open_doc`)
+instead of a `pdf_b64` field. All other args + result shapes match the
+stateless counterpart exactly. A handle remains valid until `close_doc`,
+process exit, or LRU eviction (the cache holds at most 16 docs; oldest
+evicted on overflow).
+
+### `open_doc`
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required |
+
+**Result:** `{"handle": str}` (UUID4 in canonical 8-4-4-4-12 hex form).
+
+### `close_doc`
+
+| Input field | Type | Default |
+|---|---|---|
+| `handle` | string | required |
+
+**Result:** `{"closed": bool}` — `true` if the handle existed, `false` if
+already gone (idempotent; never raises).
+
+### Per-op `_h` variants
+
+The following ops accept `handle` (string, required) instead of `pdf_b64`:
+
+| Stateless op | Handle op | Result shape |
+|---|---|---|
+| `render` | `render_h` | `{"png_b64": str}` |
+| `extract_native` | `extract_native_h` | `{"words": [...]}` |
+| `extract_ocr` | `extract_ocr_h` | `{...}` or `null` |
+| `extract_text_dict` | `extract_text_dict_h` | `{"blocks": [...]}` |
+| `extract_text_plain` | `extract_text_plain_h` | `{"text": str}` |
+| `search_for` | `search_for_h` | `{"rects": [...]}` |
+| `apply_redactions` | `apply_redactions_h` | `{"pdf_b64": str, "protection_applied": bool}` |
+| `strip_metadata` | `strip_metadata_h` | `{"pdf_b64": str}` |
+| `page_count` | `page_count_h` | `{"count": int}` |
+| `page_size` | `page_size_h` | `{"width": float, "height": float}` |
+| `all_page_sizes` | `all_page_sizes_h` | `{"sizes": [[w, h], ...]}` |
+| `is_encrypted` | `is_encrypted_h` | `{"encrypted": bool}` |
+| `get_metadata` | `get_metadata_h` | `{"metadata": dict, "has_xmp": bool}` |
+
+Calling a handle op with a missing, closed, or non-string `handle` field
+returns `error_type: "HandleNotFound"`. Distinct from `ProtocolError` so
+clients can distinguish "subprocess crashed" (instance broken — respawn)
+from "handle stale" (subprocess fine — reopen via `open_doc`).
+
+`apply_redactions_h` and `strip_metadata_h` mutate the cached doc in
+place; subsequent reads on the same handle reflect the mutation. Callers
+that need to preserve the original should keep their own `pdf_bytes`
+reference.
+
 ## Observability
 
 Every successful or failed op writes one stderr line:
@@ -307,7 +374,7 @@ Every successful or failed op writes one stderr line:
 On startup, exactly one stderr line:
 
 ```
-lexcloak_pdf_tool starting protocol_version=3 pymupdf_version=<x.y.z>
+lexcloak_pdf_tool starting protocol_version=4 pymupdf_version=<x.y.z>
 ```
 
 Stdout is reserved for protocol frames -- a downstream pipe-consumer will
@@ -340,3 +407,4 @@ shipping client has caught up.
 |---|---|---|
 | 0.2.0 | 2 | Initial public release. 13 ops. |
 | 0.3.0 | 3 | Adds `all_page_sizes` batch op (14 ops). v2 stays supported for backward compat during closed-app rolling upgrade. |
+| 0.4.0 | 4 | Adds stateful handle protocol (`open_doc` + `close_doc` + 13 `_h` per-op variants, 29 ops total). Subprocess holds parsed `fitz.Document` instances keyed by UUID handle with LRU eviction (cache size 16). v2 + v3 stay supported during the rolling closed-app upgrade. `decrypt` has no `_h` variant by design — decryption is byte-in/byte-out, then callers open a fresh handle on the cleartext. |

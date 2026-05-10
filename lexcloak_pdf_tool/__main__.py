@@ -2,6 +2,19 @@
 
 Reads length-prefixed JSON commands from stdin and writes length-prefixed
 JSON responses to stdout. See ``docs/PROTOCOL.md`` for the wire contract.
+
+Protocol versions
+-----------------
+* **v2** (Session 224 base): per-call ``pdf_b64`` -- subprocess re-parses
+  the PDF on every op. Stateless.
+* **v3** (Session 291): added ``all_page_sizes`` batch op. Otherwise
+  stateless -- still per-call ``pdf_b64``.
+* **v4** (Session 295): adds stateful handle protocol. ``open_doc`` parses
+  once and returns a handle UUID; per-page ops take ``handle`` instead of
+  ``pdf_b64``. ``close_doc`` releases the cached document. Subprocess holds
+  a parsed ``fitz.Document`` per handle, capped at ``_DOC_CACHE_MAX_SIZE``
+  via LRU eviction. Stateless v2/v3 ops remain available -- v4 is purely
+  additive so older clients continue to work against a v4 subprocess.
 """
 from __future__ import annotations
 
@@ -11,6 +24,8 @@ import os
 import struct
 import sys
 import time
+import uuid
+from collections import OrderedDict
 from typing import Any
 
 # Absolute imports rather than relative -- PyInstaller's ``--onefile`` runs
@@ -36,6 +51,31 @@ from lexcloak_pdf_tool import (
     strip_metadata,
 )
 from lexcloak_pdf_tool.coords import deserialize_chardata, serialize_chardata
+# Doc-variant helpers for the v4 stateful handle protocol. These take an
+# already-open ``fitz.Document`` and reuse the same body as the bytes
+# wrappers (which open + close per call). Underscore-prefixed because the
+# library API exposes the bytes form publicly; the doc form is internal
+# to the CLI's stateful protocol.
+from lexcloak_pdf_tool.extract import (
+    _extract_text_dict_doc,
+    _extract_text_native_doc,
+    _extract_text_ocr_doc,
+    _extract_text_plain_doc,
+    _search_for_doc,
+)
+from lexcloak_pdf_tool.metadata import (
+    _all_page_sizes_doc,
+    _get_metadata_doc,
+    _is_encrypted_doc,
+    _page_count_doc,
+    _page_size_doc,
+)
+from lexcloak_pdf_tool.redact import (
+    _apply_redactions_doc,
+    _strip_metadata_doc,
+    open_pdf,
+)
+from lexcloak_pdf_tool.render import _render_page_doc
 
 # MuPDF's C library writes error/warning lines directly to fd 1 (stdout),
 # bypassing Python's sys.stdout. In a length-prefixed JSON IPC protocol
@@ -54,15 +94,84 @@ _fitz.set_messages(stream=sys.stderr)
 
 
 # Protocol constants -- see docs/PROTOCOL.md.
-# v3 (2026-05-09) added the ``all_page_sizes`` op. v2 stays in the
-# supported set so a v3 subprocess can still serve a v2 client cleanly
-# (the subprocess advertises 3 in its handshake but accepts 2 on the
-# wire). Once every shipping client speaks v3, drop 2 from the set.
-PROTOCOL_VERSION = 3
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3}
+# v3 (2026-05-09) added the ``all_page_sizes`` op. v4 (2026-05-10) adds
+# the stateful handle protocol (open_doc/close_doc + per-op _h variants).
+# v2/v3 stay supported so a v4 subprocess can still serve older clients
+# cleanly. Once every shipping client speaks v4, drop 2 + 3 from the set.
+PROTOCOL_VERSION = 4
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
+
+
+# ── Stateful handle cache (v4) ───────────────────────────────────────
+# UUID-keyed cache of parsed ``fitz.Document`` instances. ``OrderedDict``
+# carries LRU eviction order: ``move_to_end`` on access, ``popitem(last=
+# False)`` to evict the oldest. Bound the cache to a small N so a long-
+# running subprocess that leaks handles (or holds many concurrently for a
+# legitimate compare-docs use case) can't exhaust memory.
+_DOC_CACHE_MAX_SIZE = 16
+_DOC_CACHE: "OrderedDict[str, _fitz.Document]" = OrderedDict()
+
+
+class HandleNotFound(Exception):
+    """Raised when a handle-bearing op references a missing or closed handle."""
+
+
+def _evict_lru_if_full() -> None:
+    """If the cache is at capacity, close + drop the oldest entry."""
+    while len(_DOC_CACHE) >= _DOC_CACHE_MAX_SIZE:
+        old_handle, old_doc = _DOC_CACHE.popitem(last=False)
+        try:
+            old_doc.close()
+        except Exception:
+            pass
+
+
+def _store_handle(doc: _fitz.Document) -> str:
+    """Insert ``doc`` under a fresh UUID handle. Evicts LRU if at capacity."""
+    _evict_lru_if_full()
+    handle = str(uuid.uuid4())
+    _DOC_CACHE[handle] = doc
+    return handle
+
+
+def _resolve_handle(handle: Any) -> _fitz.Document:
+    """Return the cached ``fitz.Document`` for ``handle``, marking it MRU.
+
+    Raises :class:`HandleNotFound` if the handle is missing, closed, or
+    of the wrong type. The CLI dispatcher reflects the exception class
+    name as ``error_type`` so clients can distinguish "subprocess crashed"
+    from "handle stale" semantically.
+    """
+    if not isinstance(handle, str) or not handle:
+        raise HandleNotFound(
+            f"handle must be a non-empty string, got {type(handle).__name__}"
+        )
+    doc = _DOC_CACHE.get(handle)
+    if doc is None:
+        raise HandleNotFound(f"unknown or closed handle: {handle}")
+    _DOC_CACHE.move_to_end(handle)
+    return doc
+
+
+def _drop_handle(handle: Any) -> bool:
+    """Pop ``handle`` from the cache and close the document. Idempotent.
+
+    Returns True if the handle existed; False if it was already gone or
+    invalid. Never raises.
+    """
+    if not isinstance(handle, str) or not handle:
+        return False
+    doc = _DOC_CACHE.pop(handle, None)
+    if doc is None:
+        return False
+    try:
+        doc.close()
+    except Exception:
+        pass
+    return True
 
 
 def _stderr(line: str) -> None:
@@ -175,6 +284,20 @@ def _decode_pdf(cmd: dict) -> bytes:
         return base64.b64decode(cmd["pdf_b64"], validate=True)
     except (ValueError, TypeError) as exc:
         raise ValueError(f"pdf_b64 not valid base64: {exc}") from None
+
+
+def _get_handle(cmd: dict) -> str:
+    """Pull the ``handle`` field. Raise HandleNotFound on missing/bad."""
+    handle = cmd.get("handle")
+    if not isinstance(handle, str) or not handle:
+        raise HandleNotFound(
+            f"op requires non-empty 'handle' string, got "
+            f"{type(handle).__name__}"
+        )
+    return handle
+
+
+# ── Stateless ops (v2/v3) ────────────────────────────────────────────
 
 
 def _op_render(cmd: dict) -> dict:
@@ -311,7 +434,158 @@ def _op_decrypt(cmd: dict) -> dict:
     }
 
 
+# ── Stateful handle ops (v4) ─────────────────────────────────────────
+
+
+def _op_open_doc(cmd: dict) -> dict:
+    """Parse ``pdf_b64`` once, store the doc under a UUID handle.
+
+    Returns ``{"handle": "<uuid>"}``. The handle stays valid until
+    ``close_doc`` or LRU eviction (oldest dropped when cache is full).
+    """
+    pdf_bytes = _decode_pdf(cmd)
+    doc = open_pdf(pdf_bytes)
+    handle = _store_handle(doc)
+    return {"handle": handle}
+
+
+def _op_close_doc(cmd: dict) -> dict:
+    """Pop the handle from the cache and close the doc. Idempotent.
+
+    Returns ``{"closed": bool}`` -- ``True`` if the handle existed,
+    ``False`` if it was already gone (mid-shutdown race or LRU eviction
+    raced against the caller's cleanup). Never raises.
+    """
+    handle = cmd.get("handle")
+    closed = _drop_handle(handle)
+    return {"closed": closed}
+
+
+def _op_page_count_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    return {"count": _page_count_doc(doc)}
+
+
+def _op_page_size_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    page = int(cmd.get("page", 0))
+    width, height = _page_size_doc(doc, page)
+    return {"width": float(width), "height": float(height)}
+
+
+def _op_all_page_sizes_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    sizes = _all_page_sizes_doc(doc)
+    return {"sizes": [[float(w), float(h)] for w, h in sizes]}
+
+
+def _op_is_encrypted_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    return {"encrypted": bool(_is_encrypted_doc(doc))}
+
+
+def _op_get_metadata_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    return _get_metadata_doc(doc)
+
+
+def _op_render_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    page = int(cmd.get("page", 0))
+    dpi = float(cmd.get("dpi", 150))
+    png = _render_page_doc(doc, page, dpi=dpi)
+    return {"png_b64": base64.b64encode(png).decode("ascii")}
+
+
+def _op_extract_native_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    page = int(cmd.get("page", 0))
+    return {"words": _extract_text_native_doc(doc, page)}
+
+
+def _op_extract_ocr_h(cmd: dict) -> dict | None:
+    doc = _resolve_handle(_get_handle(cmd))
+    page = int(cmd.get("page", 0))
+    tessdata_path = cmd.get("tessdata_path")
+    psm = int(cmd.get("psm", 3))
+    result = _extract_text_ocr_doc(doc, page,
+                                   tessdata_path=tessdata_path, psm=psm)
+    if result is None:
+        return None
+    return {
+        "text": result.get("text") or "",
+        "chardata": serialize_chardata(result.get("chars") or []),
+        "spans": result.get("spans") or [],
+    }
+
+
+def _op_extract_text_dict_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    page = int(cmd.get("page", 0))
+    return {"blocks": _extract_text_dict_doc(doc, page)}
+
+
+def _op_extract_text_plain_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    page = int(cmd.get("page", 0))
+    return {"text": _extract_text_plain_doc(doc, page)}
+
+
+def _op_search_for_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    page = int(cmd.get("page", 0))
+    needle = cmd.get("needle") or ""
+    if not isinstance(needle, str):
+        raise ValueError(f"needle must be a string, got {type(needle).__name__}")
+    raw_chardata = cmd.get("ocr_chardata")
+    chardata = deserialize_chardata(raw_chardata) if raw_chardata else None
+    whole_word = bool(cmd.get("whole_word", False))
+    split = bool(cmd.get("split", False))
+    rects = _search_for_doc(doc, page, needle, ocr_chardata=chardata,
+                            whole_word=whole_word, split=split)
+    return {
+        "rects": [[float(r.x0), float(r.y0), float(r.x1), float(r.y1)]
+                  for r in rects],
+    }
+
+
+def _op_apply_redactions_h(cmd: dict) -> dict:
+    doc = _resolve_handle(_get_handle(cmd))
+    matches = cmd.get("matches") or []
+    redact_label = cmd.get("redact_label", "")
+    active_categories = cmd.get("active_categories")
+    removed_pages = cmd.get("removed_pages")
+    output_protection = cmd.get("output_protection")
+    out_bytes, protection_applied = _apply_redactions_doc(
+        doc, matches,
+        redact_label=redact_label,
+        active_categories=active_categories,
+        removed_pages=removed_pages,
+        output_protection=output_protection,
+    )
+    return {
+        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        "protection_applied": bool(protection_applied),
+    }
+
+
+def _op_strip_metadata_h(cmd: dict) -> dict:
+    """Mutate the open doc + return its bytes.
+
+    Note: this leaves the cached doc in a metadata-stripped state. Callers
+    typically use this op as a save-and-finish step alongside ``close_doc``;
+    if you need the original metadata back, reopen via ``open_doc``.
+    """
+    import io
+    doc = _resolve_handle(_get_handle(cmd))
+    _strip_metadata_doc(doc)
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True, clean=True)
+    return {"pdf_b64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+
 _OPS = {
+    # v2/v3 stateless ops
     "render": _op_render,
     "extract_native": _op_extract_native,
     "extract_ocr": _op_extract_ocr,
@@ -326,6 +600,22 @@ _OPS = {
     "is_encrypted": _op_is_encrypted,
     "get_metadata": _op_get_metadata,
     "decrypt": _op_decrypt,
+    # v4 stateful handle ops
+    "open_doc": _op_open_doc,
+    "close_doc": _op_close_doc,
+    "page_count_h": _op_page_count_h,
+    "page_size_h": _op_page_size_h,
+    "all_page_sizes_h": _op_all_page_sizes_h,
+    "is_encrypted_h": _op_is_encrypted_h,
+    "get_metadata_h": _op_get_metadata_h,
+    "render_h": _op_render_h,
+    "extract_native_h": _op_extract_native_h,
+    "extract_ocr_h": _op_extract_ocr_h,
+    "extract_text_dict_h": _op_extract_text_dict_h,
+    "extract_text_plain_h": _op_extract_text_plain_h,
+    "search_for_h": _op_search_for_h,
+    "apply_redactions_h": _op_apply_redactions_h,
+    "strip_metadata_h": _op_strip_metadata_h,
 }
 
 
