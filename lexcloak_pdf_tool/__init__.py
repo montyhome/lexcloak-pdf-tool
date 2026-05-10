@@ -23,6 +23,7 @@ of the same name.
 * ``strip_metadata``        -- remove document metadata + XMP.
 * ``page_count``            -- number of pages.
 * ``page_size``             -- page dimensions in points.
+* ``all_page_sizes``        -- batch: dimensions for every page.
 * ``is_encrypted``          -- distinguish empty-pw from real-pw protection.
 * ``get_metadata``          -- metadata dict + XMP-present flag.
 * ``decrypt_pdf``           -- authenticate password-protected PDFs.
@@ -56,6 +57,7 @@ from .encryption import decrypt_pdf, WrongPasswordError  # noqa: E402
 from .metadata import (  # noqa: E402
     page_count,
     page_size,
+    all_page_sizes,
     is_encrypted,
     get_metadata,
 )
@@ -82,6 +84,7 @@ __all__ = [
     "strip_metadata",
     "page_count",
     "page_size",
+    "all_page_sizes",
     "is_encrypted",
     "get_metadata",
     "decrypt_pdf",

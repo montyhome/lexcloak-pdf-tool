@@ -1,8 +1,9 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.2.0 ships
-protocol version 2.**
+parent via length-prefixed JSON frames over stdin/stdout. **v0.3.0 ships
+protocol version 3.** v2 stays in the supported set so a v3 subprocess
+serves a v2-declaring client cleanly during the rolling release.
 
 ## Frame format
 
@@ -28,7 +29,7 @@ as a clean exit.
 
 ```json
 {
-  "protocol_version": 2,
+  "protocol_version": 3,
   "op": "render"
        | "extract_native"
        | "extract_ocr"
@@ -39,6 +40,7 @@ as a clean exit.
        | "strip_metadata"
        | "page_count"
        | "page_size"
+       | "all_page_sizes"
        | "is_encrypted"
        | "get_metadata"
        | "decrypt"
@@ -47,8 +49,10 @@ as a clean exit.
 }
 ```
 
-`protocol_version` values outside the supported set (v0.2.0: `{2}`) are
-rejected with `error_type: "ProtocolVersionMismatch"`.
+`protocol_version` values outside the supported set (v0.3.0: `{2, 3}`)
+are rejected with `error_type: "ProtocolVersionMismatch"`. v2 acceptance
+is intentional backward compat for the rolling closed-app upgrade — the
+subprocess advertises 3 in its handshake but accepts 2 on the wire.
 
 ## Response schema
 
@@ -303,7 +307,7 @@ Every successful or failed op writes one stderr line:
 On startup, exactly one stderr line:
 
 ```
-lexcloak_pdf_tool starting protocol_version=2 pymupdf_version=<x.y.z>
+lexcloak_pdf_tool starting protocol_version=3 pymupdf_version=<x.y.z>
 ```
 
 Stdout is reserved for protocol frames -- a downstream pipe-consumer will
@@ -324,11 +328,15 @@ must restart a fresh subprocess.
 ## Stability
 
 `protocol_version` is the public commitment for `lexcloak-pdf-tool`'s
-wire surface. Bumps to v3 will be released as a major version of the
-package and will document additions and removals in the CHANGELOG.
+wire surface. Future bumps (v4+) will be released as a minor or major
+version of the package and will document additions and removals in the
+CHANGELOG. The supported-set policy is "current version + previous"
+during the rolling-upgrade window, then narrow back to one once every
+shipping client has caught up.
 
 ## Versioning
 
 | package version | protocol_version | notes |
 |---|---|---|
 | 0.2.0 | 2 | Initial public release. 13 ops. |
+| 0.3.0 | 3 | Adds `all_page_sizes` batch op (14 ops). v2 stays supported for backward compat during closed-app rolling upgrade. |

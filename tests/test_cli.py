@@ -23,7 +23,7 @@ import fitz
 import pytest
 
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 LENGTH_STRUCT = struct.Struct(">I")
 
 
@@ -150,6 +150,21 @@ def test_page_size_roundtrip():
     assert resp["ok"] is True
     assert resp["result"]["width"] == pytest.approx(612.0)
     assert resp["result"]["height"] == pytest.approx(792.0)
+
+
+def test_all_page_sizes_roundtrip():
+    """Batch op returns one [width, height] entry per page."""
+    pdf = _make_pdf(n_pages=3)
+    with CLISession() as s:
+        resp = s.call("all_page_sizes", pdf_b64=_b64(pdf))
+    assert resp["ok"] is True
+    sizes = resp["result"]["sizes"]
+    assert len(sizes) == 3
+    for entry in sizes:
+        assert len(entry) == 2
+        w, h = entry
+        assert w == pytest.approx(612.0)
+        assert h == pytest.approx(792.0)
 
 
 def test_is_encrypted_roundtrip_plaintext():
@@ -336,7 +351,7 @@ def test_startup_line_emitted_on_stderr():
     code, stderr = s.close()
     text = stderr.decode("utf-8", errors="replace")
     assert "lexcloak_pdf_tool starting" in text
-    assert "protocol_version=2" in text
+    assert "protocol_version=3" in text
     assert "pymupdf_version=" in text
 
 
@@ -373,7 +388,7 @@ def test_unknown_op_returns_structured_error():
 
 
 def test_protocol_version_v1_rejected():
-    """v1-declared client frames are rejected: this CLI is v2-only."""
+    """v1-declared client frames are rejected: supported set is {2, 3}."""
     with CLISession() as s:
         s.write_frame({"protocol_version": 1, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf())})
@@ -382,14 +397,24 @@ def test_protocol_version_v1_rejected():
     assert resp["error_type"] == "ProtocolVersionMismatch"
 
 
-def test_protocol_version_v3_rejected():
+def test_protocol_version_v4_rejected():
     """Future versions outside the supported set are rejected."""
     with CLISession() as s:
-        s.write_frame({"protocol_version": 3, "op": "page_count",
+        s.write_frame({"protocol_version": 4, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf())})
         resp = s.read_frame()
     assert resp["ok"] is False
     assert resp["error_type"] == "ProtocolVersionMismatch"
+
+
+def test_protocol_version_v2_still_accepted():
+    """v2 clients keep working against a v3 subprocess (backward compat)."""
+    with CLISession() as s:
+        s.write_frame({"protocol_version": 2, "op": "page_count",
+                       "pdf_b64": _b64(_make_pdf(n_pages=2))})
+        resp = s.read_frame()
+    assert resp["ok"] is True
+    assert resp["result"]["count"] == 2
 
 
 def test_corrupt_pdf_returns_structured_error_not_crash():

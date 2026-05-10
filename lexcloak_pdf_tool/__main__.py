@@ -19,6 +19,7 @@ from typing import Any
 # present) and the frozen binary (PyInstaller follows the import graph from
 # the entry script).
 from lexcloak_pdf_tool import (
+    all_page_sizes,
     apply_redactions,
     decrypt_pdf,
     extract_text_dict,
@@ -53,8 +54,12 @@ _fitz.set_messages(stream=sys.stderr)
 
 
 # Protocol constants -- see docs/PROTOCOL.md.
-PROTOCOL_VERSION = 2
-SUPPORTED_PROTOCOL_VERSIONS = {2}
+# v3 (2026-05-09) added the ``all_page_sizes`` op. v2 stays in the
+# supported set so a v3 subprocess can still serve a v2 client cleanly
+# (the subprocess advertises 3 in its handshake but accepts 2 on the
+# wire). Once every shipping client speaks v3, drop 2 from the set.
+PROTOCOL_VERSION = 3
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -264,6 +269,12 @@ def _op_page_size(cmd: dict) -> dict:
     return {"width": float(width), "height": float(height)}
 
 
+def _op_all_page_sizes(cmd: dict) -> dict:
+    pdf_bytes = _decode_pdf(cmd)
+    sizes = all_page_sizes(pdf_bytes)
+    return {"sizes": [[float(w), float(h)] for w, h in sizes]}
+
+
 def _op_is_encrypted(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     return {"encrypted": bool(is_encrypted(pdf_bytes))}
@@ -311,6 +322,7 @@ _OPS = {
     "strip_metadata": _op_strip_metadata,
     "page_count": _op_page_count,
     "page_size": _op_page_size,
+    "all_page_sizes": _op_all_page_sizes,
     "is_encrypted": _op_is_encrypted,
     "get_metadata": _op_get_metadata,
     "decrypt": _op_decrypt,
