@@ -35,6 +35,7 @@ from lexcloak_pdf_tool import (
 from lexcloak_pdf_tool.coords import (
     deserialize_chardata,
     search_in_chars,
+    search_whole_word_in_chars,
     serialize_chardata,
 )
 
@@ -399,6 +400,90 @@ def test_search_in_chars_after_round_trip_matches_in_process():
     for a, b in zip(in_process_rects, round_trip_rects):
         assert a.x0 == b.x0 and a.y0 == b.y0
         assert a.x1 == b.x1 and a.y1 == b.y1
+
+
+# ── search_whole_word_in_chars boundary semantics ────────────────────
+
+
+def _ocr_line_chars(text: str, y0: float = 10.0, y1: float = 20.0,
+                    char_w: float = 5.0, x_start: float = 10.0) -> list:
+    """Build chardata mimicking Tesseract OCR output for a single line.
+
+    Spaces in ``text`` are emitted as ``(' ', None)`` to match the
+    line-break / inter-word marker convention used by the OCR pipeline.
+    Non-space chars get sequential bboxes on a single baseline.
+    """
+    chars: list = []
+    x = x_start
+    for c in text:
+        if c == " ":
+            chars.append((" ", None))
+        else:
+            chars.append((c, (x, y0, x + char_w, y1)))
+            x += char_w
+    return chars
+
+
+def test_whole_word_matches_when_preceded_by_punctuation_no_space_bbox():
+    """Regression: a needle preceded by ``label:`` (no bbox-bearing space
+    between) used to be rejected because bbox-proximity surrounding-char
+    extraction concatenated adjacent chars without a separator, so the
+    word-boundary regex saw the needle glued to neighbours. The fix
+    operates on chardata-reconstructed text where None-bbox markers
+    render as spaces, so the boundary check sees real word boundaries.
+
+    Mirrors real-world OCR shape: "Name: Susan R." rendered as a
+    sequence of letter bboxes interleaved with None-bbox space markers.
+    """
+    chars = _ocr_line_chars("Name: Susan R. Smith")
+    rects = search_whole_word_in_chars("Susan", chars)
+    assert len(rects) == 1
+
+
+def test_whole_word_rejects_substring_inside_longer_word():
+    """``Susan`` inside ``Susannah`` is a true substring, not a whole word."""
+    chars = _ocr_line_chars("The Susannah file")
+    rects = search_whole_word_in_chars("Susan", chars)
+    assert rects == []
+
+
+def test_whole_word_matches_at_text_start():
+    """No char before idx 0 — boundary check must treat start-of-text
+    as a word boundary."""
+    chars = _ocr_line_chars("Susan called")
+    rects = search_whole_word_in_chars("Susan", chars)
+    assert len(rects) == 1
+
+
+def test_whole_word_matches_at_text_end():
+    """No char after idx + len(needle) — boundary check must treat
+    end-of-text as a word boundary."""
+    chars = _ocr_line_chars("called Susan")
+    rects = search_whole_word_in_chars("Susan", chars)
+    assert len(rects) == 1
+
+
+def test_whole_word_matches_multiple_occurrences():
+    """Same needle appearing twice in the same line should yield two rects."""
+    chars = _ocr_line_chars("Susan met Susan today")
+    rects = search_whole_word_in_chars("Susan", chars)
+    assert len(rects) == 2
+
+
+def test_whole_word_punctuation_boundary():
+    """Adjacent punctuation (``.``, ``,``, ``:``) is not ``\\w`` — must
+    not block a whole-word match."""
+    chars = _ocr_line_chars("Susan,Bob;Carol.Dave")
+    for needle in ("Susan", "Bob", "Carol", "Dave"):
+        rects = search_whole_word_in_chars(needle, chars)
+        assert len(rects) == 1, f"{needle!r} should match exactly once"
+
+
+def test_whole_word_empty_inputs():
+    """Defensive: empty needle and empty chars both return [] cleanly."""
+    chars = _ocr_line_chars("Susan called")
+    assert search_whole_word_in_chars("", chars) == []
+    assert search_whole_word_in_chars("Susan", []) == []
 
 
 # ── pymupdf_version probe ────────────────────────────────────────────
