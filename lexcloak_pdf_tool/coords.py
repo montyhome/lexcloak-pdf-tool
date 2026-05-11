@@ -137,36 +137,75 @@ def search_whole_word_in_chars(needle: str, chars: list) -> list:
     """Whole-word search in character data -- filters out substring hits.
 
     Equivalent to a word-boundary-respecting search using pre-extracted
-    chars. Uses ``\\w``-aware regex boundaries so numeric substrings like
-    "15" inside "07/15/1973" are correctly rejected.
+    chars. Word-boundary semantics match the ``\\w`` regex class --
+    rejects matches whose preceding or following character is
+    alphanumeric or underscore.
     """
-    rects = search_in_chars(needle, chars)
-    if not rects:
-        return rects
+    if not chars or not needle:
+        return []
 
     text_parts: list[str] = []
+    char_map: list[tuple[str, tuple | None]] = []
     for c, bbox in chars:
-        text_parts.append(" " if bbox is None else c)
+        if bbox is None:
+            text_parts.append(" ")
+            char_map.append((" ", None))
+        else:
+            text_parts.append(c)
+            char_map.append((c, bbox))
 
-    boundary_pattern = re.compile(
-        r"(?<!\w)" + re.escape(needle) + r"(?!\w)",
-        re.IGNORECASE,
-    )
+    full_text = "".join(text_parts)
+    needle_lower = needle.lower()
+    text_lower = full_text.lower()
+    needle_len = len(needle_lower)
 
-    verified: list = []
-    for r in rects:
-        char_pad = 5
-        surrounding_chars: list[str] = []
-        for c, bbox in chars:
-            if bbox is None:
-                continue
-            if (bbox[2] > r.x0 - char_pad and bbox[0] < r.x1 + char_pad
-                    and bbox[3] > r.y0 and bbox[1] < r.y1):
-                surrounding_chars.append(c)
-        surrounding = "".join(surrounding_chars).strip()
-        if not surrounding or boundary_pattern.search(surrounding):
-            verified.append(r)
-    return verified
+    rects: list = []
+    start = 0
+    while True:
+        idx = text_lower.find(needle_lower, start)
+        if idx == -1:
+            break
+
+        # Verification reads ``full_text`` directly so OCR spaces (which
+        # arrive as ``bbox=None`` line-break markers, rendered as " "
+        # above) show up between adjacent words. A bbox-proximity approach
+        # concatenates adjacent-word chars without a separator and
+        # falsely rejects valid matches like "Susan" in "Name: Susan R."
+        # because the surrounding string reads "...name:susanr..." with
+        # no space between needle and next-word.
+        before_ok = idx == 0 or not (
+            text_lower[idx - 1].isalnum() or text_lower[idx - 1] == "_"
+        )
+        after_idx = idx + needle_len
+        after_ok = after_idx >= len(text_lower) or not (
+            text_lower[after_idx].isalnum() or text_lower[after_idx] == "_"
+        )
+        if not (before_ok and after_ok):
+            start = idx + 1
+            continue
+
+        match_bboxes = []
+        for i in range(idx, min(idx + needle_len, len(char_map))):
+            _, bbox = char_map[i]
+            if bbox is not None:
+                match_bboxes.append(bbox)
+
+        if match_bboxes:
+            line_groups = _group_by_line(match_bboxes)
+            for group in line_groups:
+                x0 = min(bb[0] for bb in group)
+                y0 = min(bb[1] for bb in group)
+                x1 = max(bb[2] for bb in group)
+                y1 = max(bb[3] for bb in group)
+                r = _RectTuple(x0, y0, x1, y1)
+                if r.height > _MAX_OCR_LINE_H:
+                    r = _RectTuple(r.x0, r.y0, r.x1,
+                                   r.y0 + _MAX_OCR_LINE_H)
+                rects.append(r)
+
+        start = idx + 1
+
+    return rects
 
 
 def split_search_in_chars(text: str, chars: list) -> list:
