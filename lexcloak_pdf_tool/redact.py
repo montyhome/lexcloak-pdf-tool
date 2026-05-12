@@ -134,7 +134,8 @@ def _apply_redactions_doc(doc, matches: list[dict],
     _validate_redaction_payload(matches, removed_pages)
 
     removed_set = set(removed_pages) if removed_pages else set()
-    active_set = set(active_categories) if active_categories else None
+    # `[]` means caller turned every category off — must NOT collapse to None.
+    active_set = set(active_categories) if active_categories is not None else None
     by_page: dict[int, list[dict]] = {}
     for m in matches:
         if not m.get("enabled", True):
