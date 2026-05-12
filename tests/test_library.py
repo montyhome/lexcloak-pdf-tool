@@ -315,6 +315,101 @@ def test_apply_redactions_inverted_rect_raises():
         apply_redactions(pdf, matches)
 
 
+# ── apply_redactions: active_categories filter ─────────────────────────
+#
+# Regression guards for the empty-list-vs-None distinction. The earlier
+# `if active_categories else None` collapsed `[]` ("user turned every
+# category off") into `None` ("no filter"), causing every match to be
+# redacted regardless of UI state. Each test below pins one of the four
+# code paths through the filter.
+
+
+def _ssn_match(extra: dict | None = None) -> dict:
+    """SSN match positioned over the fixture text 'Patient SSN 123-45-6789'."""
+    m = {
+        "id": "ssn", "type": "SSN", "page": 0,
+        "rect": {"x0": 30, "y0": 80, "x1": 300, "y1": 120},
+        "enabled": True, "text": "123-45-6789",
+    }
+    if extra:
+        m.update(extra)
+    return m
+
+
+def _read_page_text(pdf_bytes: bytes, page: int = 0) -> str:
+    out_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return out_doc[page].get_text()
+    finally:
+        out_doc.close()
+
+
+def test_apply_redactions_active_categories_none_redacts_all():
+    """`active_categories=None` (no filter) still redacts every enabled match."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    out, _ = apply_redactions(pdf, [_ssn_match()], active_categories=None)
+    assert "123-45-6789" not in _read_page_text(out)
+
+
+def test_apply_redactions_active_categories_empty_skips_detector_matches():
+    """`active_categories=[]` (every UI category off) must NOT redact
+    detector-typed matches. Privacy regression guard."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    out, _ = apply_redactions(pdf, [_ssn_match()], active_categories=[])
+    assert "123-45-6789" in _read_page_text(out)
+
+
+def test_apply_redactions_active_categories_empty_still_redacts_manual_region():
+    """`active_categories=[]` keeps the Manual Region / Custom bypass —
+    user-drawn regions are not category-gated."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    manual = _ssn_match({"type": "Manual Region", "id": "manual"})
+    out, _ = apply_redactions(pdf, [manual], active_categories=[])
+    assert "123-45-6789" not in _read_page_text(out)
+
+
+def test_apply_redactions_active_categories_empty_still_redacts_custom():
+    """`Custom` matches also bypass the category filter."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    custom = _ssn_match({"type": "Custom", "id": "custom"})
+    out, _ = apply_redactions(pdf, [custom], active_categories=[])
+    assert "123-45-6789" not in _read_page_text(out)
+
+
+def test_apply_redactions_active_categories_populated_filters_by_type():
+    """Populated list redacts only matches whose type is in the set."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    ssn = _ssn_match()
+    person = _ssn_match({"type": "Person Name", "id": "person"})
+    out, _ = apply_redactions(pdf, [ssn, person], active_categories=["SSN"])
+    # Only one rect covers the text region, so both matches target the same
+    # text; the SSN match drives the redaction. Verify the type filter does
+    # not block it.
+    assert "123-45-6789" not in _read_page_text(out)
+
+
+def test_apply_redactions_active_categories_populated_skips_other_types():
+    """Match whose type is NOT in active_categories is skipped."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    person = _ssn_match({"type": "Person Name", "id": "person"})
+    out, _ = apply_redactions(pdf, [person], active_categories=["SSN"])
+    assert "123-45-6789" in _read_page_text(out)
+
+
+def test_apply_redactions_active_categories_mixed_obeys_filter_and_bypass():
+    """Mixed match list with empty active_categories: only Manual Region
+    survives the filter; detector matches are skipped."""
+    pdf = _make_pdf("Patient SSN 123-45-6789", n_pages=2)
+    p1_detector = _ssn_match()
+    p2_manual = _ssn_match({"type": "Manual Region", "id": "manual", "page": 1})
+    out, _ = apply_redactions(pdf, [p1_detector, p2_manual],
+                              active_categories=[])
+    # Detector match on page 0 must NOT redact.
+    assert "123-45-6789" in _read_page_text(out, 0)
+    # Manual region on page 1 must redact.
+    assert "123-45-6789" not in _read_page_text(out, 1)
+
+
 # ── strip_metadata ───────────────────────────────────────────────────
 
 
