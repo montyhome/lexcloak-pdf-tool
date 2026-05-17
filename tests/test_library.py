@@ -24,14 +24,22 @@ from lexcloak_pdf_tool import (
     all_page_sizes,
     apply_redactions,
     extract_text_native,
+    insert_cover_page,
     is_encrypted,
     page_count,
     page_size,
     pymupdf_version,
     render_page,
     search_for,
+    set_metadata,
     strip_metadata,
 )
+from lexcloak_pdf_tool.cover_page import (
+    _COVER_PAGE_FOOTER,
+    _COVER_PAGE_TITLE,
+    _insert_cover_page_doc,
+)
+from lexcloak_pdf_tool.metadata import _ALLOWED_METADATA_KEYS, _set_metadata_doc
 from lexcloak_pdf_tool.coords import (
     deserialize_chardata,
     search_in_chars,
@@ -436,6 +444,328 @@ def test_strip_metadata_doc_form_returns_none_and_mutates():
     result = strip_metadata(doc)
     assert result is None
     assert (doc.metadata or {}).get("author") in (None, "")
+    doc.close()
+
+
+# ── set_metadata ─────────────────────────────────────────────────────
+
+
+def test_set_metadata_round_trip_subject_producer_keywords():
+    """The Spec-13 happy path: Subject/Producer/Keywords land verbatim."""
+    pdf = _make_pdf()
+    fields = {
+        "subject": "Auto-redacted by Lex Cloak. Review before distribution.",
+        "producer": "Lex Cloak 1.7.8",
+        "keywords": "auto-redacted, review-required",
+    }
+    out = set_metadata(pdf, fields)
+
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    meta = out_doc.metadata or {}
+    out_doc.close()
+    assert meta["subject"] == fields["subject"]
+    assert meta["producer"] == fields["producer"]
+    assert meta["keywords"] == fields["keywords"]
+
+
+def test_set_metadata_preserves_existing_fields_not_in_payload():
+    """Merge semantics: fields not in ``payload`` survive untouched."""
+    doc = fitz.open()
+    doc.set_metadata({"author": "Original Author", "title": "Original Title"})
+    doc.new_page()
+    pdf = doc.tobytes()
+    doc.close()
+
+    out = set_metadata(pdf, {"subject": "added subject"})
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    meta = out_doc.metadata or {}
+    out_doc.close()
+    assert meta["author"] == "Original Author"
+    assert meta["title"] == "Original Title"
+    assert meta["subject"] == "added subject"
+
+
+def test_set_metadata_empty_dict_is_noop():
+    """Empty fields round-trips the PDF without metadata changes."""
+    doc = fitz.open()
+    doc.set_metadata({"author": "A", "title": "T"})
+    doc.new_page()
+    pdf = doc.tobytes()
+    doc.close()
+
+    out = set_metadata(pdf, {})
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    meta = out_doc.metadata or {}
+    out_doc.close()
+    assert meta["author"] == "A"
+    assert meta["title"] == "T"
+
+
+def test_set_metadata_unknown_key_raises_value_error():
+    """Caller-supplied unknown keys fail fast with a named-key message."""
+    pdf = _make_pdf()
+    with pytest.raises(ValueError, match=r"unknown metadata key"):
+        set_metadata(pdf, {"subject": "ok", "bogus_field": "nope"})
+
+
+def test_set_metadata_non_dict_payload_raises_value_error():
+    """``fields`` must be a dict; anything else fails fast."""
+    pdf = _make_pdf()
+    with pytest.raises(ValueError, match=r"fields must be a dict"):
+        set_metadata(pdf, "not a dict")  # type: ignore[arg-type]
+
+
+def test_set_metadata_unicode_keywords_round_trip():
+    """Non-ASCII keywords (e.g., accented language codes) survive."""
+    pdf = _make_pdf()
+    out = set_metadata(pdf, {"keywords": "auto-redactée, revue-requise"})
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    meta = out_doc.metadata or {}
+    out_doc.close()
+    assert meta["keywords"] == "auto-redactée, revue-requise"
+
+
+def test_set_metadata_long_value_round_trip():
+    """Producer-style strings well past typical lengths round-trip cleanly."""
+    pdf = _make_pdf()
+    long_value = "Lex Cloak " + ("x" * 4096)
+    out = set_metadata(pdf, {"producer": long_value})
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    meta = out_doc.metadata or {}
+    out_doc.close()
+    assert meta["producer"] == long_value
+
+
+def test_set_metadata_doc_form_mutates_in_place():
+    """``_set_metadata_doc`` mutates the live Document, returns None."""
+    doc = fitz.open()
+    doc.set_metadata({"author": "A"})
+    doc.new_page()
+    result = _set_metadata_doc(doc, {"subject": "S"})
+    assert result is None
+    meta = doc.metadata or {}
+    assert meta["author"] == "A"
+    assert meta["subject"] == "S"
+    doc.close()
+
+
+def test_set_metadata_doc_form_empty_dict_is_noop():
+    """No-op short-circuits before PyMuPDF call (no metadata mutation)."""
+    doc = fitz.open()
+    doc.set_metadata({"author": "A"})
+    doc.new_page()
+    _set_metadata_doc(doc, {})
+    assert (doc.metadata or {})["author"] == "A"
+    doc.close()
+
+
+def test_set_metadata_allowed_keys_matches_pymupdf_contract():
+    """The validator's whitelist must be a subset of what PyMuPDF accepts.
+
+    Regression guard: if PyMuPDF drops a key we list, our pre-check would
+    pass an unsupported field through and surface a deeper error.
+    """
+    doc = fitz.open()
+    doc.new_page()
+    # PyMuPDF accepts the entire allowed-set; verify by setting all at once.
+    valid_payload = {k: "" for k in _ALLOWED_METADATA_KEYS}
+    # 'encryption' read-back is None for plaintext; setting "" leaves it None
+    # but PyMuPDF doesn't reject the key name. Same for 'format'.
+    doc.set_metadata(valid_payload)
+    doc.close()
+
+
+def test_set_metadata_redacted_pdf_then_strip_round_trip():
+    """Lex Cloak pipeline: redact -> set Spec-13 metadata -> strip == idempotent
+    on metadata wipe. Demonstrates set + strip work in the same flow."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    # Apply Spec-13 fields
+    intermediate = set_metadata(pdf, {
+        "subject": "Auto-redacted by Lex Cloak. Review before distribution.",
+        "producer": "Lex Cloak 1.7.8",
+        "keywords": "auto-redacted, review-required",
+    })
+    # Verify they landed
+    doc = fitz.open(stream=intermediate, filetype="pdf")
+    assert (doc.metadata or {})["subject"].startswith("Auto-redacted")
+    doc.close()
+    # Then strip should wipe them
+    stripped = strip_metadata(intermediate)
+    doc = fitz.open(stream=stripped, filetype="pdf")
+    meta = doc.metadata or {}
+    doc.close()
+    assert (meta.get("subject") or "") == ""
+    assert (meta.get("keywords") or "") == ""
+
+
+# ── insert_cover_page ───────────────────────────────────────────────
+
+
+def _default_context(date="2026-05-17", n=12, p=5, version="1.7.8") -> dict:
+    return {
+        "date": date,
+        "redacted_count": n,
+        "page_count": p,
+        "product_version": version,
+    }
+
+
+def test_insert_cover_page_adds_one_page_at_index_zero():
+    """Page count grows by 1; original page-0 content shifts to page 1."""
+    doc = fitz.open()
+    doc.new_page(width=612, height=792).insert_text(
+        fitz.Point(50, 100), "ORIGINAL_PAGE_ONE_MARKER", fontsize=12)
+    doc.new_page(width=612, height=792).insert_text(
+        fitz.Point(50, 100), "ORIGINAL_PAGE_TWO_MARKER", fontsize=12)
+    pdf = doc.tobytes()
+    doc.close()
+
+    out = insert_cover_page(pdf, _default_context(p=2))
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        assert len(out_doc) == 3
+        assert "ORIGINAL_PAGE_ONE_MARKER" in out_doc[1].get_text()
+        assert "ORIGINAL_PAGE_TWO_MARKER" in out_doc[2].get_text()
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_renders_title_and_footer_with_em_dash():
+    """Verbatim title + footer including em-dash (U+2014) render correctly.
+
+    The title is searched whole (no ligature glyphs). The footer is
+    split because PyMuPDF's renderer emits an ``ﬁ`` ligature (U+FB01) for
+    the ``fi`` in ``local-first``, and ``search_for`` does not normalize
+    the literal-string query against the rendered ligature.
+    """
+    pdf = _make_pdf()
+    out = insert_cover_page(pdf, _default_context())
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        cover = out_doc[0]
+        # Title (em-dash is U+2014, must be preserved verbatim)
+        assert cover.search_for(_COVER_PAGE_TITLE), (
+            "cover page title with em-dash not found via search"
+        )
+        # Footer split around the ``fi`` ligature in ``first``.
+        assert cover.search_for("Lex Cloak —"), "footer em-dash missing"
+        assert cover.search_for("PDF redaction."), "footer body missing"
+        assert cover.search_for("lexcloak.com"), "footer URL missing"
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_renders_template_substitutions():
+    """Date / N / P substitute into the body sentence."""
+    pdf = _make_pdf()
+    out = insert_cover_page(pdf, _default_context(date="2026-05-17", n=42, p=7))
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        cover = out_doc[0]
+        assert cover.search_for("2026-05-17"), "date not rendered"
+        # N + P render as standalone integers
+        assert cover.search_for("42 items"), "redacted count not rendered"
+        assert cover.search_for("7 pages"), "page count not rendered"
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_renders_body_anchor_phrase():
+    """Body text includes the recipient-review-required clause verbatim."""
+    pdf = _make_pdf()
+    out = insert_cover_page(pdf, _default_context())
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        cover = out_doc[0]
+        # No ligatures in this phrase; safe for direct text-extraction check.
+        text = cover.get_text()
+        assert "downstream recipients should apply their own review" in text
+        assert "before further distribution" in text
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_matches_a4_page_size():
+    """A4 input -> A4 cover. Otherwise the cover looks wrong in viewers."""
+    a4_width, a4_height = 595.0, 842.0
+    doc = fitz.open()
+    doc.new_page(width=a4_width, height=a4_height)
+    pdf = doc.tobytes()
+    doc.close()
+
+    out = insert_cover_page(pdf, _default_context(p=1))
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        cover_rect = out_doc[0].rect
+        assert float(cover_rect.width) == pytest.approx(a4_width)
+        assert float(cover_rect.height) == pytest.approx(a4_height)
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_large_redaction_count_renders_cleanly():
+    """4-digit counts don't break the layout (boundary stress)."""
+    pdf = _make_pdf()
+    out = insert_cover_page(pdf, _default_context(n=9999, p=500))
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        cover = out_doc[0]
+        assert cover.search_for("9999 items")
+        assert cover.search_for("500 pages")
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_zero_redaction_count_still_renders():
+    """N=0 ships verbatim per the no-pluralization rule."""
+    pdf = _make_pdf()
+    out = insert_cover_page(pdf, _default_context(n=0, p=1))
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        assert out_doc[0].search_for("0 items")
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_missing_required_key_raises():
+    pdf = _make_pdf()
+    with pytest.raises(ValueError, match=r"missing required context key"):
+        insert_cover_page(pdf, {"date": "2026-05-17", "redacted_count": 1})
+
+
+def test_insert_cover_page_unknown_key_raises():
+    pdf = _make_pdf()
+    with pytest.raises(ValueError, match=r"unknown context key"):
+        insert_cover_page(pdf, {
+            **_default_context(),
+            "bogus_key": "x",
+        })
+
+
+def test_insert_cover_page_non_dict_context_raises():
+    pdf = _make_pdf()
+    with pytest.raises(ValueError, match=r"context must be a dict"):
+        insert_cover_page(pdf, "not a dict")  # type: ignore[arg-type]
+
+
+def test_insert_cover_page_product_version_optional():
+    """product_version is accepted-but-not-required (forward-compat)."""
+    pdf = _make_pdf()
+    ctx = {"date": "2026-05-17", "redacted_count": 1, "page_count": 1}
+    out = insert_cover_page(pdf, ctx)
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        assert len(out_doc) == 2
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_doc_form_mutates_in_place():
+    doc = fitz.open()
+    doc.new_page(width=612, height=792)
+    pre_len = len(doc)
+    _insert_cover_page_doc(doc, _default_context(p=1))
+    assert len(doc) == pre_len + 1
     doc.close()
 
 

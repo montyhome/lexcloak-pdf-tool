@@ -323,6 +323,114 @@ def test_strip_metadata_roundtrip():
     assert (meta.get("author") or "") == ""
 
 
+def test_set_metadata_roundtrip_spec_13_fields():
+    """The launch payload: Spec-13 Subject + Producer + Keywords."""
+    pdf = _make_pdf()
+    fields = {
+        "subject": "Auto-redacted by Lex Cloak. Review before distribution.",
+        "producer": "Lex Cloak 1.7.8",
+        "keywords": "auto-redacted, review-required",
+    }
+    with CLISession() as s:
+        resp = s.call("set_metadata", pdf_b64=_b64(pdf), fields=fields)
+    assert resp["ok"] is True
+    out = base64.b64decode(resp["result"]["pdf_b64"])
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    meta = out_doc.metadata or {}
+    out_doc.close()
+    assert meta["subject"] == fields["subject"]
+    assert meta["producer"] == fields["producer"]
+    assert meta["keywords"] == fields["keywords"]
+
+
+def test_set_metadata_missing_fields_arg_returns_error():
+    """Omitting the ``fields`` key surfaces a ValueError via the wire."""
+    pdf = _make_pdf()
+    with CLISession() as s:
+        resp = s.call("set_metadata", pdf_b64=_b64(pdf))
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "fields" in resp["error"]
+
+
+def test_set_metadata_unknown_key_returns_error():
+    """Unknown key surfaces ValueError with the offending key named."""
+    pdf = _make_pdf()
+    with CLISession() as s:
+        resp = s.call("set_metadata", pdf_b64=_b64(pdf),
+                      fields={"bogus_field": "x"})
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "bogus_field" in resp["error"]
+
+
+def test_set_metadata_empty_fields_returns_valid_pdf():
+    """Empty fields round-trips a valid PDF (no metadata change)."""
+    pdf = _make_pdf()
+    with CLISession() as s:
+        resp = s.call("set_metadata", pdf_b64=_b64(pdf), fields={})
+    assert resp["ok"] is True
+    out = base64.b64decode(resp["result"]["pdf_b64"])
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    assert len(out_doc) == 1  # page count preserved
+    out_doc.close()
+
+
+# ── insert_cover_page ───────────────────────────────────────────────
+
+
+def _cover_context(date="2026-05-17", n=12, p=5, version="1.7.8") -> dict:
+    return {
+        "date": date, "redacted_count": n, "page_count": p,
+        "product_version": version,
+    }
+
+
+def test_insert_cover_page_roundtrip_adds_page():
+    pdf = _make_pdf(n_pages=3)
+    with CLISession() as s:
+        resp = s.call("insert_cover_page", pdf_b64=_b64(pdf),
+                      context=_cover_context(p=3))
+    assert resp["ok"] is True
+    out = base64.b64decode(resp["result"]["pdf_b64"])
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        assert len(out_doc) == 4
+        # The verbatim title (em-dash) must be searchable on page 0
+        assert out_doc[0].search_for("Redacted document — review required")
+    finally:
+        out_doc.close()
+
+
+def test_insert_cover_page_missing_context_returns_error():
+    pdf = _make_pdf()
+    with CLISession() as s:
+        resp = s.call("insert_cover_page", pdf_b64=_b64(pdf))
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "context" in resp["error"]
+
+
+def test_insert_cover_page_missing_required_key_returns_error():
+    pdf = _make_pdf()
+    with CLISession() as s:
+        resp = s.call("insert_cover_page", pdf_b64=_b64(pdf),
+                      context={"date": "2026-05-17", "redacted_count": 1})
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "page_count" in resp["error"]
+
+
+def test_insert_cover_page_unknown_key_returns_error():
+    pdf = _make_pdf()
+    bad_ctx = {**_cover_context(), "bogus_key": "x"}
+    with CLISession() as s:
+        resp = s.call("insert_cover_page", pdf_b64=_b64(pdf), context=bad_ctx)
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "bogus_key" in resp["error"]
+
+
 def test_extract_ocr_roundtrip_when_unavailable():
     """If Tesseract isn't installed locally, ``extract_ocr`` returns null.
 
@@ -972,6 +1080,104 @@ def test_strip_metadata_h_produces_bytes():
         assert not meta.get("title")
     finally:
         out_doc.close()
+
+
+def test_set_metadata_h_matches_stateless():
+    """Handle-form output equals stateless-form output for same fields."""
+    pdf = _make_pdf()
+    fields = {"subject": "Auto-redacted", "producer": "Lex Cloak 1.7.8"}
+    with CLISession() as s:
+        stateless = s.call("set_metadata", pdf_b64=_b64(pdf), fields=fields)
+        handle = _open(s, pdf)
+        handle_resp = s.call("set_metadata_h", handle=handle, fields=fields)
+    assert stateless["ok"] is True and handle_resp["ok"] is True
+
+    # Compare by re-opening both and reading metadata back -- byte
+    # equality is not guaranteed (PyMuPDF embeds timestamps + producer
+    # autogen during save), but the metadata fields should match.
+    sl_doc = fitz.open(stream=base64.b64decode(stateless["result"]["pdf_b64"]),
+                       filetype="pdf")
+    h_doc = fitz.open(stream=base64.b64decode(handle_resp["result"]["pdf_b64"]),
+                      filetype="pdf")
+    try:
+        sl_meta = sl_doc.metadata or {}
+        h_meta = h_doc.metadata or {}
+        assert sl_meta["subject"] == h_meta["subject"] == "Auto-redacted"
+        assert sl_meta["producer"] == h_meta["producer"] == "Lex Cloak 1.7.8"
+    finally:
+        sl_doc.close()
+        h_doc.close()
+
+
+def test_set_metadata_h_persists_on_cached_doc():
+    """After set_metadata_h, subsequent get_metadata_h on the SAME handle
+    returns the merged fields -- proves the mutation is live on the cached
+    doc, not just baked into the returned bytes."""
+    pdf = _make_pdf()
+    with CLISession() as s:
+        handle = _open(s, pdf)
+        s.call("set_metadata_h", handle=handle,
+               fields={"subject": "persisted"})
+        get_resp = s.call("get_metadata_h", handle=handle)
+    assert get_resp["ok"] is True
+    assert get_resp["result"]["metadata"]["subject"] == "persisted"
+
+
+def test_set_metadata_h_unknown_key_returns_error():
+    pdf = _make_pdf()
+    with CLISession() as s:
+        handle = _open(s, pdf)
+        resp = s.call("set_metadata_h", handle=handle,
+                      fields={"bogus_field": "x"})
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "bogus_field" in resp["error"]
+
+
+def test_insert_cover_page_h_matches_stateless():
+    """Handle-form output shape matches stateless: +1 page, title on cover."""
+    pdf = _make_pdf(n_pages=2)
+    ctx = _cover_context(p=2)
+    with CLISession() as s:
+        stateless = s.call("insert_cover_page", pdf_b64=_b64(pdf),
+                           context=ctx)
+        handle = _open(s, pdf)
+        handle_resp = s.call("insert_cover_page_h", handle=handle,
+                             context=ctx)
+    assert stateless["ok"] is True and handle_resp["ok"] is True
+    for resp in (stateless, handle_resp):
+        out_doc = fitz.open(
+            stream=base64.b64decode(resp["result"]["pdf_b64"]),
+            filetype="pdf")
+        try:
+            assert len(out_doc) == 3
+            assert out_doc[0].search_for(
+                "Redacted document — review required")
+        finally:
+            out_doc.close()
+
+
+def test_insert_cover_page_h_persists_on_cached_doc():
+    """After insert_cover_page_h, page_count_h on the SAME handle reports
+    +1 -- proves the mutation is live on the cached doc."""
+    pdf = _make_pdf(n_pages=2)
+    with CLISession() as s:
+        handle = _open(s, pdf)
+        s.call("insert_cover_page_h", handle=handle,
+               context=_cover_context(p=2))
+        count_resp = s.call("page_count_h", handle=handle)
+    assert count_resp["ok"] is True
+    assert count_resp["result"]["count"] == 3
+
+
+def test_insert_cover_page_h_missing_context_returns_error():
+    pdf = _make_pdf()
+    with CLISession() as s:
+        handle = _open(s, pdf)
+        resp = s.call("insert_cover_page_h", handle=handle)
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "context" in resp["error"]
 
 
 def test_multiple_handles_isolated():

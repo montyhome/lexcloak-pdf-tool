@@ -1,7 +1,8 @@
 """PDF metadata probes -- page count, page size, encryption state.
 
 Cheap inspection ops for callers that need page count, page size, or
-encryption state without touching the document body.
+encryption state without touching the document body. Also houses
+``set_metadata`` (write op), the symmetric counterpart to ``get_metadata``.
 
 Each public ``<func>(pdf_bytes, ...)`` opens a fresh ``fitz.Document``,
 calls the matching ``_<func>_doc(doc, ...)`` helper, then closes. The
@@ -10,7 +11,19 @@ calls the matching ``_<func>_doc(doc, ...)`` helper, then closes. The
 """
 from __future__ import annotations
 
+import io
+
 from .redact import open_pdf
+
+
+# Keys PyMuPDF's ``Document.set_metadata`` accepts. Caller-supplied keys
+# outside this set raise ``ValueError`` before reaching PyMuPDF -- the
+# pre-validation gives the wrapper a named-key error message instead of
+# PyMuPDF's terser ``bad dict key(s): {...}``.
+_ALLOWED_METADATA_KEYS = frozenset({
+    "title", "author", "subject", "keywords", "creator", "producer",
+    "creationDate", "modDate", "trapped", "format", "encryption",
+})
 
 
 def _page_count_doc(doc) -> int:
@@ -107,3 +120,49 @@ def get_metadata(pdf_bytes: bytes) -> dict:
         return _get_metadata_doc(doc)
     finally:
         doc.close()
+
+
+def _set_metadata_doc(doc, fields: dict) -> None:
+    """Merge ``fields`` into the document's metadata in place.
+
+    Empty ``fields`` is a no-op. Unknown keys (outside
+    ``_ALLOWED_METADATA_KEYS``) raise ``ValueError`` before reaching
+    PyMuPDF so the wire layer surfaces a named-key error.
+
+    PyMuPDF 1.27.2 merges partial dicts implicitly (passing
+    ``{"subject": "x"}`` preserves author/title), but the explicit
+    ``{**doc.metadata, **fields}`` here is defensive against future
+    PyMuPDF version drift.
+    """
+    if not isinstance(fields, dict):
+        raise ValueError(
+            f"fields must be a dict, got {type(fields).__name__}"
+        )
+    if not fields:
+        return
+    unknown = set(fields.keys()) - _ALLOWED_METADATA_KEYS
+    if unknown:
+        raise ValueError(
+            f"unknown metadata key(s): {sorted(unknown)}. "
+            f"Allowed: {sorted(_ALLOWED_METADATA_KEYS)}"
+        )
+    merged = {**(doc.metadata or {}), **fields}
+    doc.set_metadata(merged)
+
+
+def set_metadata(pdf_bytes: bytes, fields: dict) -> bytes:
+    """Merge ``fields`` into the PDF's metadata, return new bytes.
+
+    Unspecified standard fields are preserved (merge semantics, not
+    overwrite). Empty ``fields`` round-trips the PDF through PyMuPDF
+    without changing metadata. Validates keys before opening so a bad
+    payload fails fast.
+    """
+    doc = open_pdf(pdf_bytes)
+    try:
+        _set_metadata_doc(doc, fields)
+        buf = io.BytesIO()
+        doc.save(buf, garbage=4, deflate=True, clean=True)
+    finally:
+        doc.close()
+    return buf.getvalue()

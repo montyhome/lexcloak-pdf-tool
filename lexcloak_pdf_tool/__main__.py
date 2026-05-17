@@ -42,15 +42,18 @@ from lexcloak_pdf_tool import (
     extract_text_ocr,
     extract_text_plain,
     get_metadata,
+    insert_cover_page,
     is_encrypted,
     page_count,
     page_size,
     pymupdf_version,
     render_page,
     search_for,
+    set_metadata,
     strip_metadata,
 )
 from lexcloak_pdf_tool.coords import deserialize_chardata, serialize_chardata
+from lexcloak_pdf_tool.cover_page import _insert_cover_page_doc
 # Doc-variant helpers for the v4 stateful handle protocol. These take an
 # already-open ``fitz.Document`` and reuse the same body as the bytes
 # wrappers (which open + close per call). Underscore-prefixed because the
@@ -69,6 +72,7 @@ from lexcloak_pdf_tool.metadata import (
     _is_encrypted_doc,
     _page_count_doc,
     _page_size_doc,
+    _set_metadata_doc,
 )
 from lexcloak_pdf_tool.redact import (
     _apply_redactions_doc,
@@ -380,6 +384,24 @@ def _op_strip_metadata(cmd: dict) -> dict:
     return {"pdf_b64": base64.b64encode(out_bytes).decode("ascii")}
 
 
+def _op_set_metadata(cmd: dict) -> dict:
+    pdf_bytes = _decode_pdf(cmd)
+    fields = cmd.get("fields")
+    if fields is None:
+        raise ValueError("op requires 'fields' dict")
+    out_bytes = set_metadata(pdf_bytes, fields)
+    return {"pdf_b64": base64.b64encode(out_bytes).decode("ascii")}
+
+
+def _op_insert_cover_page(cmd: dict) -> dict:
+    pdf_bytes = _decode_pdf(cmd)
+    context = cmd.get("context")
+    if context is None:
+        raise ValueError("op requires 'context' dict")
+    out_bytes = insert_cover_page(pdf_bytes, context)
+    return {"pdf_b64": base64.b64encode(out_bytes).decode("ascii")}
+
+
 def _op_page_count(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     return {"count": page_count(pdf_bytes)}
@@ -584,6 +606,43 @@ def _op_strip_metadata_h(cmd: dict) -> dict:
     return {"pdf_b64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
 
+def _op_set_metadata_h(cmd: dict) -> dict:
+    """Merge ``fields`` into the cached doc + return its bytes.
+
+    Mirrors ``_op_strip_metadata_h``: mutates the live doc, then saves
+    a fresh byte stream. The cached doc retains the merged metadata for
+    any subsequent ops on this handle.
+    """
+    import io
+    doc = _resolve_handle(_get_handle(cmd))
+    fields = cmd.get("fields")
+    if fields is None:
+        raise ValueError("op requires 'fields' dict")
+    _set_metadata_doc(doc, fields)
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True, clean=True)
+    return {"pdf_b64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+
+def _op_insert_cover_page_h(cmd: dict) -> dict:
+    """Insert a Spec-14 cover page into the cached doc + return its bytes.
+
+    Mutates the live doc: the cover lands at page index 0, original
+    pages shift to index 1+. Subsequent ops on this handle see the
+    page-shifted document; callers that need both views should reopen
+    a fresh handle from the original bytes.
+    """
+    import io
+    doc = _resolve_handle(_get_handle(cmd))
+    context = cmd.get("context")
+    if context is None:
+        raise ValueError("op requires 'context' dict")
+    _insert_cover_page_doc(doc, context)
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True, clean=True)
+    return {"pdf_b64": base64.b64encode(buf.getvalue()).decode("ascii")}
+
+
 _OPS = {
     # v2/v3 stateless ops
     "render": _op_render,
@@ -594,6 +653,8 @@ _OPS = {
     "search_for": _op_search_for,
     "apply_redactions": _op_apply_redactions,
     "strip_metadata": _op_strip_metadata,
+    "set_metadata": _op_set_metadata,
+    "insert_cover_page": _op_insert_cover_page,
     "page_count": _op_page_count,
     "page_size": _op_page_size,
     "all_page_sizes": _op_all_page_sizes,
@@ -616,6 +677,8 @@ _OPS = {
     "search_for_h": _op_search_for_h,
     "apply_redactions_h": _op_apply_redactions_h,
     "strip_metadata_h": _op_strip_metadata_h,
+    "set_metadata_h": _op_set_metadata_h,
+    "insert_cover_page_h": _op_insert_cover_page_h,
 }
 
 
