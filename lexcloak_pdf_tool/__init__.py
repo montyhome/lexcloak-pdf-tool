@@ -26,6 +26,8 @@ of the same name.
 * ``all_page_sizes``        -- batch: dimensions for every page.
 * ``is_encrypted``          -- distinguish empty-pw from real-pw protection.
 * ``get_metadata``          -- metadata dict + XMP-present flag.
+* ``set_metadata``          -- merge metadata fields, preserving the rest.
+* ``insert_cover_page``     -- insert a "review required" cover page at index 0.
 * ``decrypt_pdf``           -- authenticate password-protected PDFs.
 
 Plus ``pymupdf_version()`` (probe) and CharData serialization helpers in
@@ -53,6 +55,7 @@ from .extract import (  # noqa: E402
     search_for,
 )
 from .redact import apply_redactions, strip_metadata  # noqa: E402
+from .cover_page import insert_cover_page  # noqa: E402
 from .encryption import decrypt_pdf, WrongPasswordError  # noqa: E402
 from .metadata import (  # noqa: E402
     page_count,
@@ -60,6 +63,7 @@ from .metadata import (  # noqa: E402
     all_page_sizes,
     is_encrypted,
     get_metadata,
+    set_metadata,
 )
 from .coords import (  # noqa: E402
     search_in_chars,
@@ -87,6 +91,8 @@ __all__ = [
     "all_page_sizes",
     "is_encrypted",
     "get_metadata",
+    "set_metadata",
+    "insert_cover_page",
     "decrypt_pdf",
     "WrongPasswordError",
     # Library-only CharData helpers
