@@ -154,6 +154,36 @@ def _apply_redactions_doc(doc, matches: list[dict],
             rect = Rect(r["x0"], r["y0"], r["x1"], r["y1"])
             box_h = rect.height
             font_size = min(11, max(5, box_h * 0.7))
+            # Match rects arrive in the app's as-rendered (rotation-applied)
+            # space -- the frame render_page / page_size / OCR geometry all
+            # share. ``add_redact_annot`` instead interprets its rect in the
+            # page's *native* (unrotated, MediaBox-origin) space, so on a
+            # ``/Rotate`` page the burn lands displaced (point-mirrored at 180,
+            # transposed at 90/270) and the exported box misses the content the
+            # user covered in-app -- privacy-grade on the landscape legal /
+            # medical pages that carry rotation flags. Map as-rendered ->
+            # native before burning, in two steps:
+            #   1. ``* derotation_matrix`` -- the rotated->native inverse.
+            #      Confirmed empirically against the strict-xfail goldens
+            #      (``rotation_matrix`` is wrong at 90/270 and only coincides
+            #      at 180, where rotation is its own inverse).
+            #   2. ``(+mb.x0, -mb.y0)`` MediaBox-origin shift -- derotation is
+            #      about a 0-based frame, but on a rotated page ``add_redact_
+            #      annot`` expects the MediaBox-offset origin, leaving a
+            #      residual translation when the MediaBox origin is non-zero
+            #      (e.g. a cropped + rotated page lands ~the crop margin off).
+            #      A no-op for the common 0-origin MediaBox, so 0-origin
+            #      landscape scans (the real-world case) ride step 1 alone.
+            # Both steps were pinned by affine-fit/invert ground truth, not
+            # guessed. ``normalize`` re-orders the corners the 180/270 flip
+            # inverts; ``font_size`` keeps the as-rendered ``box_h`` so the
+            # label tracks the visible box. Root-caused S514; fixed S590.
+            if page.rotation:
+                rect = rect * page.derotation_matrix
+                rect.normalize()
+                mb = page.mediabox
+                rect = Rect(rect.x0 + mb.x0, rect.y0 - mb.y0,
+                            rect.x1 + mb.x0, rect.y1 - mb.y0)
             if redact_label:
                 page.add_redact_annot(
                     rect,
