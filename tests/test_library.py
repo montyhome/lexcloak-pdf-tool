@@ -323,6 +323,65 @@ def test_apply_redactions_inverted_rect_raises():
         apply_redactions(pdf, matches)
 
 
+# ── apply_redactions: /Rotate geometry (Session 590) ───────────────────
+#
+# The app supplies match rects in as-rendered (rotation-applied) space, but
+# add_redact_annot interprets them in the page's native (unrotated) space.
+# Pre-S590, _apply_redactions_doc burned with no rotation transform, so on a
+# /Rotate page the box landed point-mirrored (180) / transposed (90, 270) and
+# the covered content stayed readable in the export. Privacy-grade. The fix
+# derotates each rect (+ a MediaBox-origin shift for cropped pages) before the
+# burn. The redact app's strict-xfail goldens
+# (tests/test_session_514_apply_rotation.py) are the integration oracle; this
+# pins the same invariant directly on the library function.
+
+
+def _is_dark_at(pdf_bytes: bytes, page: int, x_pt: float, y_pt: float,
+                dpi: float = 144.0) -> bool:
+    """True if the as-rendered pixel at (x_pt, y_pt) point-space is near-black.
+
+    Renders the page as displayed (get_pixmap honors /Rotate), so the point
+    coordinates are in the same as-rendered frame the app supplies rects in.
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        zoom = dpi / 72.0
+        pix = doc[page].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        r, g, b = pix.pixel(int(x_pt * zoom), int(y_pt * zoom))[:3]
+        return r < 40 and g < 40 and b < 40
+    finally:
+        doc.close()
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_apply_redactions_rotated_page_lands_in_as_rendered_space(rotation):
+    """A redaction supplied in as-rendered space lands on that exact region in
+    the export for every /Rotate value. The supplied center (150, 120) must
+    render black; pre-fix it stayed white because the box was displaced into
+    unrotated space."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    if rotation:
+        page.set_rotation(rotation)
+    pdf = doc.tobytes()
+    doc.close()
+    matches = [{
+        "id": "m", "type": "Manual Region", "page": 0,
+        "rect": {"x0": 100, "y0": 100, "x1": 200, "y1": 140},
+        "enabled": True, "text": "",
+    }]
+    out, _ = apply_redactions(pdf, matches)
+    assert _is_dark_at(out, 0, 150, 120), (
+        f"/Rotate {rotation}: redaction did not land on the supplied "
+        f"as-rendered region (pre-S590 it burned in unrotated space)"
+    )
+    # A point well outside the supplied box stays clear — the box is localized,
+    # not a whole-page smear.
+    assert not _is_dark_at(out, 0, 40, 40), (
+        f"/Rotate {rotation}: unexpected dark pixel far from the supplied box"
+    )
+
+
 # ── apply_redactions: active_categories filter ─────────────────────────
 #
 # Regression guards for the empty-list-vs-None distinction. The earlier
