@@ -117,6 +117,38 @@ def strip_metadata(pdf_bytes_or_doc):
     return None
 
 
+def _flatten_form_fields(doc) -> None:
+    """Flatten AcroForm widget fields into static page content.
+
+    Form-field values live in the widget ``/V`` and the document AcroForm
+    dictionary -- OUTSIDE the page content stream that
+    ``page.apply_redactions()`` scrubs. Without this step a redaction box drawn
+    over a form field blacks out the *visual* but leaves the underlying value
+    fully extractable via ``get_text()`` and present in the raw output bytes --
+    a real PII leak for a redaction tool. The leak bites even when the app
+    "redacts" the field: the value is visible to the detector through
+    ``get_text`` (PyMuPDF surfaces widget text), so a match IS produced at the
+    widget rect, yet the box only covers the rendering and the ``/V`` survives.
+
+    ``doc.bake(widgets=True)`` converts every interactive widget to static page
+    content BEFORE the redaction loop, so the now-static value under a redaction
+    rect is removed by ``apply_redactions`` and no interactive field (and no
+    residual ``/V``) survives in the exported, safe-to-share PDF. Form fields
+    the user did NOT redact remain as static, non-interactive content -- the
+    correct shape for a final redacted artifact (an interactive form can carry
+    hidden values, scripts, and reset actions a redacted output must not ship).
+
+    Guarded by ``is_form_pdf`` so the overwhelmingly-common no-form PDF takes
+    the identical, byte-for-byte-unchanged path. ``annots=False`` leaves
+    non-widget annotations untouched -- annotation-borne text is a distinct
+    surface, out of scope for this AcroForm fix.
+    """
+    if not doc.is_form_pdf:
+        return
+    # bake(annots=False, widgets=True): flatten only interactive form widgets.
+    doc.bake(annots=False, widgets=True)
+
+
 def _apply_redactions_doc(doc, matches: list[dict],
                           redact_label: str = "",
                           active_categories: list[str] | set[str] | None = None,
@@ -126,12 +158,16 @@ def _apply_redactions_doc(doc, matches: list[dict],
                           ) -> tuple[bytes, bool]:
     """Apply redactions to an open ``fitz.Document`` and return (bytes, protected).
 
-    Mutates ``doc`` in place: redaction annotations are applied, requested
-    pages are deleted, metadata is stripped. Caller owns ``doc`` lifecycle —
-    this helper does NOT close it. Used by both the bytes-IPC entry point
-    and the v0.4.0 stateful handle protocol.
+    Mutates ``doc`` in place: AcroForm widgets are flattened to static content,
+    redaction annotations are applied, requested pages are deleted, metadata is
+    stripped. Caller owns ``doc`` lifecycle -- this helper does NOT close it.
+    Used by both the bytes-IPC entry point and the v0.4.0 stateful handle
+    protocol.
     """
     _validate_redaction_payload(matches, removed_pages)
+    # Flatten form fields BEFORE redacting: a widget /V survives a redaction
+    # box otherwise (see _flatten_form_fields). No-op for non-form PDFs.
+    _flatten_form_fields(doc)
 
     removed_set = set(removed_pages) if removed_pages else set()
     # `[]` means caller turned every category off — must NOT collapse to None.
