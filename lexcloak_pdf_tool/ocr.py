@@ -409,6 +409,36 @@ def _expand_word_bbox_to_chars(text: str, bbox: tuple[float, float, float, float
 # ── Subprocess OCR pipeline ──────────────────────────────────────────────────
 
 
+def _tesseract_hocr_argv(binary: str, tessdata_path: str, psm: int) -> list[str]:
+    """Build the Tesseract argv for hOCR output via stdin -> stdout.
+
+    Single source of truth for the invocation so it can never silently drift.
+
+    hOCR is requested via explicit ``-c`` params instead of the ``hocr``
+    configfile argument. The configfile form makes Tesseract read
+    ``<datadir>/configs/hocr`` -- a filesystem lookup the bundled Windows
+    tessdata could not resolve (the choco / configfile-vs-``--tessdata-dir``
+    layout differs from Homebrew). When it fails, Tesseract prints
+    ``read_params_file: Can't open hocr`` to stderr, EXITS 0, and emits an
+    empty hOCR skeleton -- which slips past the returncode and empty-stdout
+    guards in :func:`_run_tesseract`, parses to zero lines, and returns an
+    empty page SILENTLY. Session 617 fixed the closed app's in-repo OCR path
+    (``app/rules/ocr.py``); this is the matching fix for the AGPL subprocess
+    ``extract_text_ocr`` cold path used by structured-text / Export-Text
+    redaction + diagnostics. The two ``-c`` params are exactly the two lines of
+    the stock ``configs/hocr`` file, so the output is byte-identical where the
+    configfile resolves, but they carry no filesystem dependency.
+    """
+    return [
+        binary, "stdin", "stdout",
+        "-l", "eng",
+        "--psm", str(psm),
+        "--tessdata-dir", tessdata_path,
+        "-c", "tessedit_create_hocr=1",
+        "-c", "hocr_font_info=0",
+    ]
+
+
 def _run_tesseract(png_bytes: bytes, psm: int, tessdata_path: str) -> bytes | None:
     """Invoke Tesseract via stdin -> stdout, requesting hOCR output.
 
@@ -438,13 +468,7 @@ def _run_tesseract(png_bytes: bytes, psm: int, tessdata_path: str) -> bytes | No
         )
         return None
     try:
-        argv = [
-            binary, "stdin", "stdout",
-            "-l", "eng",
-            "--psm", str(psm),
-            "--tessdata-dir", tessdata_path,
-            "hocr",
-        ]
+        argv = _tesseract_hocr_argv(binary, tessdata_path, psm)
         proc = subprocess.run(
             argv,
             input=png_bytes,
