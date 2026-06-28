@@ -477,6 +477,122 @@ def test_apply_redactions_active_categories_mixed_obeys_filter_and_bypass():
     assert "123-45-6789" not in _read_page_text(out, 1)
 
 
+# ── apply_redactions: blackout_pages (Session 592 triage redesign) ─────
+#
+# A "dropped" page can have one of two outcomes: removed_pages deletes it
+# from the output; blackout_pages keeps it but covers it edge-to-edge in
+# solid black with the underlying content SCRUBBED. The load-bearing
+# property is that a blackout never depends on per-match completeness — a
+# dropped page can never ship partially redacted or readable. These pin
+# that contract directly on the library function.
+
+
+def test_apply_redactions_blackout_scrubs_page_text():
+    """A blacked-out page's text is removed from the output, not just covered."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    out, _ = apply_redactions(pdf, [], blackout_pages=[0])
+    assert "123-45-6789" not in _read_page_text(out, 0)
+    assert _read_page_text(out, 0).strip() == ""
+
+
+def test_apply_redactions_blackout_no_per_match_dependency():
+    """Blackout fully blacks the page with NO matches supplied — the page's
+    safety does not ride on per-match completeness."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    out, _ = apply_redactions(pdf, [], blackout_pages=[0])
+    # Solid black edge-to-edge: text region, center, and a far corner are all
+    # dark — the cover is the whole page, not just where content happened to be.
+    assert _is_dark_at(out, 0, 50, 100)   # over the (now scrubbed) text
+    assert _is_dark_at(out, 0, 306, 396)  # page center
+    assert _is_dark_at(out, 0, 560, 740)  # far corner, no content there
+
+
+def test_apply_redactions_blackout_keeps_page_in_output():
+    """Blackout keeps the page (unlike remove, which deletes it)."""
+    pdf = _make_pdf(n_pages=3)
+    out, _ = apply_redactions(pdf, [], blackout_pages=[1])
+    assert page_count(out) == 3
+
+
+def test_apply_redactions_blackout_leaves_other_pages_untouched():
+    """Only the blackout page is covered; siblings keep their content + stay clear."""
+    pdf = _make_pdf("Patient SSN 123-45-6789", n_pages=3)
+    out, _ = apply_redactions(pdf, [], blackout_pages=[1])
+    assert "123-45-6789" in _read_page_text(out, 0)
+    assert "123-45-6789" in _read_page_text(out, 2)
+    assert not _is_dark_at(out, 0, 560, 740)  # sibling far corner stays clear
+    assert _read_page_text(out, 1).strip() == ""
+
+
+def test_apply_redactions_remove_precedence_over_blackout():
+    """A page listed in BOTH removed_pages and blackout_pages is deleted —
+    remove wins, blackout on it is a no-op (the page is gone)."""
+    pdf = _make_pdf(n_pages=3)
+    out, _ = apply_redactions(pdf, [], removed_pages=[1], blackout_pages=[1])
+    assert page_count(out) == 2
+
+
+def test_apply_redactions_blackout_and_remove_combo():
+    """Blackout one page + remove another in the same call: removed page gone,
+    blackout page stays-but-black, untouched page intact."""
+    pdf = _make_pdf("Patient SSN 123-45-6789", n_pages=3)
+    out, _ = apply_redactions(pdf, [], removed_pages=[2], blackout_pages=[0])
+    assert page_count(out) == 2          # page 2 deleted
+    assert _read_page_text(out, 0).strip() == ""   # page 0 blacked + scrubbed
+    assert _is_dark_at(out, 0, 306, 396)
+    assert "123-45-6789" in _read_page_text(out, 1)  # page 1 untouched
+
+
+def test_apply_redactions_blackout_all_pages_allowed():
+    """Blacking out EVERY page is valid (the doc stays, all black) — unlike
+    removing every page, which raises. A fully-redacted doc is a real output."""
+    pdf = _make_pdf("Patient SSN 123-45-6789", n_pages=2)
+    out, _ = apply_redactions(pdf, [], blackout_pages=[0, 1])
+    assert page_count(out) == 2
+    assert _read_page_text(out, 0).strip() == ""
+    assert _read_page_text(out, 1).strip() == ""
+    assert _is_dark_at(out, 0, 306, 396)
+    assert _is_dark_at(out, 1, 306, 396)
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_apply_redactions_blackout_rotated_page(rotation):
+    """Blackout covers the whole page for every /Rotate value — center and all
+    four corners render black in as-displayed space, and text is scrubbed."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text(fitz.Point(50, 100), "Patient SSN 123-45-6789", fontsize=12)
+    if rotation:
+        page.set_rotation(rotation)
+    pdf = doc.tobytes()
+    doc.close()
+    out, _ = apply_redactions(pdf, [], blackout_pages=[0])
+    assert _read_page_text(out, 0).strip() == "", (
+        f"/Rotate {rotation}: blackout left extractable text")
+    # As-displayed dimensions swap at 90/270; sample within whichever frame.
+    w, h = (792, 612) if rotation in (90, 270) else (612, 792)
+    for x, y in ((w * 0.5, h * 0.5), (15, 15), (w - 15, 15),
+                 (15, h - 15), (w - 15, h - 15)):
+        assert _is_dark_at(out, 0, x, y), (
+            f"/Rotate {rotation}: blackout missed ({x:.0f},{y:.0f})")
+
+
+def test_apply_redactions_blackout_non_integer_raises():
+    """Malformed blackout_pages (non-int) raises a named ValueError."""
+    pdf = _make_pdf()
+    with pytest.raises(ValueError, match="blackout_pages.*non-integer"):
+        apply_redactions(pdf, [], blackout_pages=["nope"])
+
+
+def test_apply_redactions_blackout_out_of_range_ignored():
+    """An out-of-range blackout index is silently ignored, not a crash —
+    a stale frontend index can't abort the export."""
+    pdf = _make_pdf("Patient SSN 123-45-6789", n_pages=1)
+    out, _ = apply_redactions(pdf, [], blackout_pages=[99])
+    assert page_count(out) == 1
+    assert "123-45-6789" in _read_page_text(out, 0)  # the real page untouched
+
+
 # ── strip_metadata ───────────────────────────────────────────────────
 
 

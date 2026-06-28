@@ -363,6 +363,7 @@ def _op_apply_redactions(cmd: dict) -> dict:
     redact_label = cmd.get("redact_label", "")
     active_categories = cmd.get("active_categories")
     removed_pages = cmd.get("removed_pages")
+    blackout_pages = cmd.get("blackout_pages")
     output_protection = cmd.get("output_protection")
     out_bytes, protection_applied = apply_redactions(
         pdf_bytes,
@@ -370,6 +371,7 @@ def _op_apply_redactions(cmd: dict) -> dict:
         redact_label=redact_label,
         active_categories=active_categories,
         removed_pages=removed_pages,
+        blackout_pages=blackout_pages,
         output_protection=output_protection,
     )
     return {
@@ -577,12 +579,14 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
     redact_label = cmd.get("redact_label", "")
     active_categories = cmd.get("active_categories")
     removed_pages = cmd.get("removed_pages")
+    blackout_pages = cmd.get("blackout_pages")
     output_protection = cmd.get("output_protection")
     out_bytes, protection_applied = _apply_redactions_doc(
         doc, matches,
         redact_label=redact_label,
         active_categories=active_categories,
         removed_pages=removed_pages,
+        blackout_pages=blackout_pages,
         output_protection=output_protection,
     )
     return {
