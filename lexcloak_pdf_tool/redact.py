@@ -18,26 +18,30 @@ def open_pdf(pdf_bytes: bytes) -> _fitz.Document:
 
 
 def _validate_redaction_payload(matches: list[dict],
-                                removed_pages: list[int] | None) -> None:
+                                removed_pages: list[int] | None,
+                                blackout_pages: list[int] | None = None) -> None:
     """Coerce + sanity-check the wire payload before opening the PDF.
 
     Mutates each match in place to coerce ``page`` to int and rect coords
-    to float so downstream code can rely on the typed shape. Raises
-    ``ValueError`` with a named-field message on the first malformed
+    to float so downstream code can rely on the typed shape. Coerces
+    ``removed_pages`` and ``blackout_pages`` entries to int in place too.
+    Raises ``ValueError`` with a named-field message on the first malformed
     entry; the caller surfaces this as a 400-class error.
 
     Without this guard, a bad payload (e.g., ``{"page": "abc"}``,
     ``{"rect": {"x0": "??"}}``, swapped x0/x1) would surface as an opaque
     PyMuPDF error deep inside ``page.add_redact_annot``.
     """
-    if removed_pages is not None:
-        try:
-            removed_pages[:] = [int(p) for p in removed_pages]
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Malformed redaction payload: removed_pages "
-                f"contains non-integer entry -- {type(exc).__name__}"
-            ) from None
+    for field_name, page_list in (("removed_pages", removed_pages),
+                                  ("blackout_pages", blackout_pages)):
+        if page_list is not None:
+            try:
+                page_list[:] = [int(p) for p in page_list]
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Malformed redaction payload: {field_name} "
+                    f"contains non-integer entry -- {type(exc).__name__}"
+                ) from None
 
     for i, m in enumerate(matches):
         if not isinstance(m, dict):
@@ -153,23 +157,36 @@ def _apply_redactions_doc(doc, matches: list[dict],
                           redact_label: str = "",
                           active_categories: list[str] | set[str] | None = None,
                           removed_pages: list[int] | None = None,
+                          blackout_pages: list[int] | None = None,
                           *,
                           output_protection: dict | None = None
                           ) -> tuple[bytes, bool]:
     """Apply redactions to an open ``fitz.Document`` and return (bytes, protected).
 
     Mutates ``doc`` in place: AcroForm widgets are flattened to static content,
-    redaction annotations are applied, requested pages are deleted, metadata is
-    stripped. Caller owns ``doc`` lifecycle -- this helper does NOT close it.
-    Used by both the bytes-IPC entry point and the v0.4.0 stateful handle
-    protocol.
+    redaction annotations are applied, ``blackout_pages`` are fully blacked out,
+    ``removed_pages`` are deleted, metadata is stripped. Caller owns ``doc``
+    lifecycle -- this helper does NOT close it. Used by both the bytes-IPC entry
+    point and the v0.4.0 stateful handle protocol.
+
+    ``removed_pages`` vs ``blackout_pages`` are the two "drop" outcomes a page
+    can have (Session 592 triage redesign): a removed page is deleted from the
+    output; a blackout page stays in the output but is covered edge-to-edge in
+    solid black with its underlying text/images SCRUBBED (a true redaction, not
+    a cosmetic draw -- nothing extractable survives). A blackout never depends
+    on per-match completeness, so a dropped page can never ship partially
+    redacted. ``removed_pages`` wins any overlap: a deleted page needs no
+    blackout, so a page listed in both is simply deleted.
     """
-    _validate_redaction_payload(matches, removed_pages)
+    _validate_redaction_payload(matches, removed_pages, blackout_pages)
     # Flatten form fields BEFORE redacting: a widget /V survives a redaction
     # box otherwise (see _flatten_form_fields). No-op for non-form PDFs.
     _flatten_form_fields(doc)
 
     removed_set = set(removed_pages) if removed_pages else set()
+    # A removed page is deleted outright, so blacking it out would be wasted
+    # work -- remove takes precedence over blackout on any overlap.
+    blackout_set = (set(blackout_pages) - removed_set) if blackout_pages else set()
     # `[]` means caller turned every category off — must NOT collapse to None.
     active_set = set(active_categories) if active_categories is not None else None
     by_page: dict[int, list[dict]] = {}
@@ -177,6 +194,11 @@ def _apply_redactions_doc(doc, matches: list[dict],
         if not m.get("enabled", True):
             continue
         if m["page"] in removed_set:
+            continue
+        if m["page"] in blackout_set:
+            # The whole-page cover below supersedes any individual box on a
+            # blackout page; skip per-match work so the page's safety never
+            # rides on per-match completeness.
             continue
         if active_set is not None and m.get("type") not in active_set:
             if m.get("type") not in ("Manual Region", "Custom"):
@@ -234,6 +256,30 @@ def _apply_redactions_doc(doc, matches: list[dict],
                 page.add_redact_annot(rect, fill=(0, 0, 0))
         page.apply_redactions()
 
+    # Full-page blackout (Session 592): cover each blackout page edge-to-edge
+    # in solid black and SCRUB the content beneath it. Runs before the
+    # ``removed_set`` delete so both operate on original page indices, and on
+    # the disjoint page set the per-match loop skipped (blackout pages are
+    # excluded from ``by_page``), so no page gets ``apply_redactions`` twice.
+    # The cover rect is the full *displayed* page mapped into native
+    # (add_redact_annot) space via the same S590-pinned derotation as the
+    # per-match path, so it lands on the whole page regardless of /Rotate or a
+    # non-zero MediaBox origin. ``apply_redactions`` removes the underlying
+    # text/images (not a cosmetic draw), so nothing extractable survives.
+    for pg_num in sorted(blackout_set):
+        if not (0 <= pg_num < len(doc)):
+            continue
+        page = doc[pg_num]
+        rect = Rect(page.rect)
+        if page.rotation:
+            rect = rect * page.derotation_matrix
+            rect.normalize()
+            mb = page.mediabox
+            rect = Rect(rect.x0 + mb.x0, rect.y0 - mb.y0,
+                        rect.x1 + mb.x0, rect.y1 - mb.y0)
+        page.add_redact_annot(rect, fill=(0, 0, 0))
+        page.apply_redactions()
+
     if removed_set:
         valid_removed = {p for p in removed_set if 0 <= p < len(doc)}
         if valid_removed and len(valid_removed) >= len(doc):
@@ -289,6 +335,7 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
                      redact_label: str = "",
                      active_categories: list[str] | set[str] | None = None,
                      removed_pages: list[int] | None = None,
+                     blackout_pages: list[int] | None = None,
                      *,
                      output_protection: dict | None = None
                      ) -> tuple[bytes, bool]:
@@ -311,6 +358,10 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
         whose ``type`` is in this set are redacted.
     removed_pages
         Optional list of page numbers to delete from the PDF.
+    blackout_pages
+        Optional list of page numbers to fully black out (the whole page is
+        covered in solid black with its content scrubbed) while keeping the
+        page in the output. ``removed_pages`` wins any overlap.
     output_protection
         Optional ``{"mode": "same"|"new"|"none", "password": str?}``.
         Modes "same"/"new" require a non-empty password. Re-encryption
@@ -342,6 +393,7 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
             redact_label=redact_label,
             active_categories=active_categories,
             removed_pages=removed_pages,
+            blackout_pages=blackout_pages,
             output_protection=output_protection,
         )
     finally:

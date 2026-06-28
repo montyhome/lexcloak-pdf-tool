@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lexcloak-pdf-tool"
-version = "0.5.3"
+version = "0.5.4"
 description = "AGPL-licensed PyMuPDF I/O wrapper used by Lex Cloak desktop. Communicates with the closed Lex Cloak app via length-prefixed JSON over stdin/stdout."
 readme = "README.md"
 requires-python = ">=3.12"
