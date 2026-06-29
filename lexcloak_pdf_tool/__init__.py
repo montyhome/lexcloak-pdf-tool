@@ -9,7 +9,7 @@ stdin/stdout.
 
 Public API
 ----------
-13 IPC-clean functions, all taking ``pdf_bytes`` (or nothing) and returning
+IPC-clean functions, all taking ``pdf_bytes`` (or nothing) and returning
 JSON-friendly primitives. The CLI dispatch table maps each one to a wire op
 of the same name.
 
@@ -29,6 +29,8 @@ of the same name.
 * ``set_metadata``          -- merge metadata fields, preserving the rest.
 * ``insert_cover_page``     -- insert a "review required" cover page at index 0.
 * ``decrypt_pdf``           -- authenticate password-protected PDFs.
+* ``reduce_size``           -- local size reduction: scrub + font subset +
+                               optional DPI image downsample (opt-in, lossy).
 
 Plus ``pymupdf_version()`` (probe) and CharData serialization helpers in
 ``lexcloak_pdf_tool.coords``.
@@ -57,6 +59,7 @@ from .extract import (  # noqa: E402
 from .redact import apply_redactions, strip_metadata  # noqa: E402
 from .cover_page import insert_cover_page  # noqa: E402
 from .encryption import decrypt_pdf, WrongPasswordError  # noqa: E402
+from .reduce_size import reduce_size  # noqa: E402
 from .metadata import (  # noqa: E402
     page_count,
     page_size,
@@ -95,6 +98,7 @@ __all__ = [
     "insert_cover_page",
     "decrypt_pdf",
     "WrongPasswordError",
+    "reduce_size",
     # Library-only CharData helpers
     "search_in_chars",
     "search_whole_word_in_chars",

@@ -304,6 +304,28 @@ instance stays alive, caller can retry with a different password).
 Unencrypted input is re-saved cleanly with the password ignored
 (defensive path).
 
+### `reduce_size`
+
+Shrink a (cleartext) PDF locally. Lossless by default (orphan/metadata
+scrub + font subsetting); opt-in image downsample when `dpi` is given.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required |
+| `dpi` | int or null | `null` (lossless — no image downsample) |
+| `quality` | int 1..100 | `75` (JPEG quality when downsampling) |
+| `grayscale` | bool | `false` (convert downsampled images to gray) |
+
+**Result:** `{"pdf_b64": str, "info": {"orig_size": int, "new_size": int, "applied_dpi": int|null}}`.
+
+`applied_dpi` is the DPI that actually shaped the returned bytes: `null`
+for the lossless path, for a downsample that failed and fell back to
+lossless, or when the no-grow guard returned the original. The op never
+returns bytes larger than the input (no-grow guard) and preserves the
+OCR/selectable text layer. Encrypted/password-protected input returns
+`error_type: "ValueError"` — the op requires cleartext (the redaction
+route compresses before any optional encryption).
+
 ### `exit`
 
 Terminates the subprocess cleanly. No response frame.
@@ -352,16 +374,17 @@ The following ops accept `handle` (string, required) instead of `pdf_b64`:
 | `all_page_sizes` | `all_page_sizes_h` | `{"sizes": [[w, h], ...]}` |
 | `is_encrypted` | `is_encrypted_h` | `{"encrypted": bool}` |
 | `get_metadata` | `get_metadata_h` | `{"metadata": dict, "has_xmp": bool}` |
+| `reduce_size` | `reduce_size_h` | `{"pdf_b64": str, "info": {...}}` |
 
 Calling a handle op with a missing, closed, or non-string `handle` field
 returns `error_type: "HandleNotFound"`. Distinct from `ProtocolError` so
 clients can distinguish "subprocess crashed" (instance broken — respawn)
 from "handle stale" (subprocess fine — reopen via `open_doc`).
 
-`apply_redactions_h` and `strip_metadata_h` mutate the cached doc in
-place; subsequent reads on the same handle reflect the mutation. Callers
-that need to preserve the original should keep their own `pdf_bytes`
-reference.
+`apply_redactions_h`, `strip_metadata_h`, and `reduce_size_h` mutate the
+cached doc in place; subsequent reads on the same handle reflect the
+mutation. Callers that need to preserve the original should keep their own
+`pdf_bytes` reference.
 
 ## Observability
 
@@ -408,3 +431,4 @@ shipping client has caught up.
 | 0.2.0 | 2 | Initial public release. 13 ops. |
 | 0.3.0 | 3 | Adds `all_page_sizes` batch op (14 ops). v2 stays supported for backward compat during closed-app rolling upgrade. |
 | 0.4.0 | 4 | Adds stateful handle protocol (`open_doc` + `close_doc` + 13 `_h` per-op variants, 29 ops total). Subprocess holds parsed `fitz.Document` instances keyed by UUID handle with LRU eviction (cache size 16). v2 + v3 stay supported during the rolling closed-app upgrade. `decrypt` has no `_h` variant by design — decryption is byte-in/byte-out, then callers open a fresh handle on the cleartext. |
+| 0.6.0 | 4 | Adds `reduce_size` op (+ `reduce_size_h`) for local PDF compression: lossless scrub + font subset, opt-in DPI image downsample, no-grow guard, cleartext-only. Additive — no protocol bump; v2–v4 unaffected. Doc gap: the 0.5.0–0.5.4 op additions (`set_metadata`, `insert_cover_page`, `blackout_pages`) predate this row and are not yet captured in the per-op contracts above. |

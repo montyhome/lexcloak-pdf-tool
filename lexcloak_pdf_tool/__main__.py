@@ -19,6 +19,7 @@ Protocol versions
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import struct
@@ -47,6 +48,7 @@ from lexcloak_pdf_tool import (
     page_count,
     page_size,
     pymupdf_version,
+    reduce_size,
     render_page,
     search_for,
     set_metadata,
@@ -79,6 +81,7 @@ from lexcloak_pdf_tool.redact import (
     _strip_metadata_doc,
     open_pdf,
 )
+from lexcloak_pdf_tool.reduce_size import _apply_reductions, _validate_reduce_params
 from lexcloak_pdf_tool.render import _render_page_doc
 
 # MuPDF's C library writes error/warning lines directly to fd 1 (stdout),
@@ -404,6 +407,20 @@ def _op_insert_cover_page(cmd: dict) -> dict:
     return {"pdf_b64": base64.b64encode(out_bytes).decode("ascii")}
 
 
+def _op_reduce_size(cmd: dict) -> dict:
+    pdf_bytes = _decode_pdf(cmd)
+    dpi = cmd.get("dpi")
+    quality = cmd.get("quality", 75)
+    grayscale = bool(cmd.get("grayscale", False))
+    out_bytes, info = reduce_size(
+        pdf_bytes, dpi=dpi, quality=quality, grayscale=grayscale
+    )
+    return {
+        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        "info": info,
+    }
+
+
 def _op_page_count(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     return {"count": page_count(pdf_bytes)}
@@ -647,6 +664,47 @@ def _op_insert_cover_page_h(cmd: dict) -> dict:
     return {"pdf_b64": base64.b64encode(buf.getvalue()).decode("ascii")}
 
 
+def _save_doc_bytes(doc) -> bytes:
+    """Serialize a live ``fitz.Document`` with the standard save params."""
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True, clean=True)
+    return buf.getvalue()
+
+
+def _op_reduce_size_h(cmd: dict) -> dict:
+    """Shrink the cached doc in place + return its bytes + size info.
+
+    The handle holds a parsed doc, not its original bytes, so the current
+    state is serialized first for ``orig_size`` and the no-grow comparison.
+    Like the other ``_h`` save ops this leaves the cached doc in its reduced
+    state; callers use it as a save-and-finish step before ``close_doc``.
+    """
+    doc = _resolve_handle(_get_handle(cmd))
+    dpi = cmd.get("dpi")
+    quality = cmd.get("quality", 75)
+    grayscale = bool(cmd.get("grayscale", False))
+    _validate_reduce_params(dpi, quality)
+    if doc.is_encrypted and doc.needs_pass:
+        raise ValueError("reduce_size() input must be cleartext")
+    orig_bytes = _save_doc_bytes(doc)
+    applied_dpi = _apply_reductions(
+        doc, dpi=dpi, quality=quality, grayscale=grayscale
+    )
+    new_bytes = _save_doc_bytes(doc)
+    if len(new_bytes) >= len(orig_bytes):
+        out_bytes, applied_dpi = orig_bytes, None
+    else:
+        out_bytes = new_bytes
+    return {
+        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        "info": {
+            "orig_size": len(orig_bytes),
+            "new_size": len(out_bytes),
+            "applied_dpi": applied_dpi,
+        },
+    }
+
+
 _OPS = {
     # v2/v3 stateless ops
     "render": _op_render,
@@ -659,6 +717,7 @@ _OPS = {
     "strip_metadata": _op_strip_metadata,
     "set_metadata": _op_set_metadata,
     "insert_cover_page": _op_insert_cover_page,
+    "reduce_size": _op_reduce_size,
     "page_count": _op_page_count,
     "page_size": _op_page_size,
     "all_page_sizes": _op_all_page_sizes,
@@ -683,6 +742,7 @@ _OPS = {
     "strip_metadata_h": _op_strip_metadata_h,
     "set_metadata_h": _op_set_metadata_h,
     "insert_cover_page_h": _op_insert_cover_page_h,
+    "reduce_size_h": _op_reduce_size_h,
 }
 
 
