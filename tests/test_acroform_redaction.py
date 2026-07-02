@@ -305,6 +305,7 @@ def test_orphan_widget_value_redacted_from_text_and_bytes():
     assert SSN.encode() not in out
     assert NAME.encode() not in out
     assert b"/Widget" not in out
+    assert b"/AcroForm" not in out
     doc = fitz.open(stream=out, filetype="pdf")
     try:
         text = doc[0].get_text()
@@ -328,6 +329,7 @@ def test_orphan_unredacted_field_retained_as_static_text():
     finally:
         doc.close()
     assert b"/Widget" not in out
+    assert b"/AcroForm" not in out
 
 
 import pytest as _pytest  # local alias; module otherwise pytest-free
@@ -343,6 +345,7 @@ def test_orphan_page_blackout_scrubs_widget_values(page_rotate):
     assert SSN.encode() not in out
     assert KEEP_VALUE.encode() not in out
     assert b"/Widget" not in out
+    assert b"/AcroForm" not in out
     doc = fitz.open(stream=out, filetype="pdf")
     try:
         assert doc[0].get_text().strip() == ""
