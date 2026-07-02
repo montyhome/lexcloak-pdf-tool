@@ -153,6 +153,69 @@ def _flatten_form_fields(doc) -> None:
     doc.bake(annots=False, widgets=True)
 
 
+# A rect within this many points of a page edge is treated as flush against
+# it for off-page overscan purposes (OCR bboxes clamp at 0, so "flush" in
+# practice means exactly-at-the-edge plus float fuzz).
+_PAGE_EDGE_EPSILON = 1.0
+# How far past the page bounds an overscan region extends. Glyphs drawn
+# outside the page box (print headers/footers clipped by the scan, cropped
+# margins) still extract via ``get_text`` when any sliver of the glyph pokes
+# into the page -- yet ``apply_redactions`` KEEPS a glyph whose overlap with
+# the redaction region is a sliver (empirically <~2pt of the glyph box, both
+# pymupdf 1.27.x and 1.28.x). Session 659 found live blackout exports with
+# descender glyphs (p/y/g) + form furniture extractable from header lines
+# hanging ~1pt into the page. Extending the redaction region well past the
+# edge makes those glyphs fully contained, so the text filter removes them.
+# 10k pt is far beyond any real content offset while staying comfortably
+# inside PDF implementation coordinate limits (+/-32767).
+_EDGE_OVERSCAN = 10000.0
+
+
+def _edge_overscan_strips(rect, page_rect) -> list:
+    """Off-page scrub strips for a match rect flush against a page edge.
+
+    A redaction rect can only cover the in-page part of a clipped glyph
+    (payload validation rejects negative coords), so a header line hanging
+    off the page survives the text filter as extractable slivers. For every
+    side of ``rect`` flush against ``page_rect`` (within
+    ``_PAGE_EDGE_EPSILON``), emit an off-page strip extending
+    ``_EDGE_OVERSCAN`` past that edge, sharing the rect's cross-axis span.
+    The strips are separate redaction annots so the USER's rect -- its fill
+    geometry and label placement -- stays byte-identical; interior rects
+    (the overwhelmingly common case) get no strips at all.
+
+    Both rects are in the as-rendered (rotation-applied) frame; the caller
+    derotates strips exactly like the main rect before burning.
+    """
+    strips = []
+    if rect.y0 <= page_rect.y0 + _PAGE_EDGE_EPSILON:  # flush top
+        strips.append(Rect(rect.x0, page_rect.y0 - _EDGE_OVERSCAN,
+                           rect.x1, page_rect.y0 + _PAGE_EDGE_EPSILON))
+    if rect.y1 >= page_rect.y1 - _PAGE_EDGE_EPSILON:  # flush bottom
+        strips.append(Rect(rect.x0, page_rect.y1 - _PAGE_EDGE_EPSILON,
+                           rect.x1, page_rect.y1 + _EDGE_OVERSCAN))
+    if rect.x0 <= page_rect.x0 + _PAGE_EDGE_EPSILON:  # flush left
+        strips.append(Rect(page_rect.x0 - _EDGE_OVERSCAN, rect.y0,
+                           page_rect.x0 + _PAGE_EDGE_EPSILON, rect.y1))
+    if rect.x1 >= page_rect.x1 - _PAGE_EDGE_EPSILON:  # flush right
+        strips.append(Rect(page_rect.x1 - _PAGE_EDGE_EPSILON, rect.y0,
+                           page_rect.x1 + _EDGE_OVERSCAN, rect.y1))
+    return strips
+
+
+def _derotate_to_native(rect, page):
+    """Map an as-rendered (rotation-applied) rect into the native frame
+    ``add_redact_annot`` expects -- the S590 two-step transform (derotation
+    + MediaBox-origin shift). No-op frame-wise on an unrotated page; the
+    caller guards on ``page.rotation``.
+    """
+    rect = rect * page.derotation_matrix
+    rect.normalize()
+    mb = page.mediabox
+    return Rect(rect.x0 + mb.x0, rect.y0 - mb.y0,
+                rect.x1 + mb.x0, rect.y1 - mb.y0)
+
+
 def _apply_redactions_doc(doc, matches: list[dict],
                           redact_label: str = "",
                           active_categories: list[str] | set[str] | None = None,
@@ -207,41 +270,36 @@ def _apply_redactions_doc(doc, matches: list[dict],
 
     for pg_num, pg_matches in by_page.items():
         page = doc[pg_num]
+        page_rect = Rect(page.rect)  # as-rendered (rotation-applied) box
         for m in pg_matches:
             r = m["rect"]
             rect = Rect(r["x0"], r["y0"], r["x1"], r["y1"])
             box_h = rect.height
             font_size = min(11, max(5, box_h * 0.7))
+            # Off-page scrub strips for rects flush against a page edge --
+            # computed in the as-rendered frame BEFORE derotation so the
+            # flush test runs against the same box the app's rects live in
+            # (Session 659; see _edge_overscan_strips).
+            strips = _edge_overscan_strips(rect, page_rect)
             # Match rects arrive in the app's as-rendered (rotation-applied)
             # space -- the frame render_page / page_size / OCR geometry all
             # share. ``add_redact_annot`` instead interprets its rect in the
             # page's *native* (unrotated, MediaBox-origin) space, so on a
-            # ``/Rotate`` page the burn lands displaced (point-mirrored at 180,
-            # transposed at 90/270) and the exported box misses the content the
-            # user covered in-app -- privacy-grade on the landscape legal /
-            # medical pages that carry rotation flags. Map as-rendered ->
-            # native before burning, in two steps:
-            #   1. ``* derotation_matrix`` -- the rotated->native inverse.
-            #      Confirmed empirically against the strict-xfail goldens
-            #      (``rotation_matrix`` is wrong at 90/270 and only coincides
-            #      at 180, where rotation is its own inverse).
-            #   2. ``(+mb.x0, -mb.y0)`` MediaBox-origin shift -- derotation is
-            #      about a 0-based frame, but on a rotated page ``add_redact_
-            #      annot`` expects the MediaBox-offset origin, leaving a
-            #      residual translation when the MediaBox origin is non-zero
-            #      (e.g. a cropped + rotated page lands ~the crop margin off).
-            #      A no-op for the common 0-origin MediaBox, so 0-origin
-            #      landscape scans (the real-world case) ride step 1 alone.
-            # Both steps were pinned by affine-fit/invert ground truth, not
-            # guessed. ``normalize`` re-orders the corners the 180/270 flip
-            # inverts; ``font_size`` keeps the as-rendered ``box_h`` so the
-            # label tracks the visible box. Root-caused S514; fixed S590.
+            # ``/Rotate`` page an untransformed burn lands displaced
+            # (point-mirrored at 180, transposed at 90/270) -- privacy-grade
+            # on the landscape legal / medical pages that carry rotation
+            # flags. ``_derotate_to_native`` is the S590 two-step transform
+            # (derotation + MediaBox-origin shift), pinned by affine-fit /
+            # invert ground truth against the strict goldens -- see its
+            # docstring. ``font_size`` keeps the as-rendered ``box_h`` so the
+            # label tracks the visible box. Root-caused S514; fixed S590;
+            # extraction-verified (fill AND text-scrub, both pymupdf lines)
+            # S659.
             if page.rotation:
-                rect = rect * page.derotation_matrix
-                rect.normalize()
-                mb = page.mediabox
-                rect = Rect(rect.x0 + mb.x0, rect.y0 - mb.y0,
-                            rect.x1 + mb.x0, rect.y1 - mb.y0)
+                rect = _derotate_to_native(rect, page)
+                strips = [_derotate_to_native(s, page) for s in strips]
+            for s in strips:
+                page.add_redact_annot(s, fill=(0, 0, 0))
             if redact_label:
                 page.add_redact_annot(
                     rect,
@@ -263,20 +321,22 @@ def _apply_redactions_doc(doc, matches: list[dict],
     # excluded from ``by_page``), so no page gets ``apply_redactions`` twice.
     # The cover rect is the full *displayed* page mapped into native
     # (add_redact_annot) space via the same S590-pinned derotation as the
-    # per-match path, so it lands on the whole page regardless of /Rotate or a
-    # non-zero MediaBox origin. ``apply_redactions`` removes the underlying
-    # text/images (not a cosmetic draw), so nothing extractable survives.
+    # per-match path, then inflated ``_EDGE_OVERSCAN`` past every edge
+    # (Session 659): content drawn OUTSIDE the page box -- clipped print
+    # headers/footers -- pokes sliver glyphs into the page that extract via
+    # ``get_text`` yet survive a page-bounds redaction region (the text
+    # filter keeps sliver-overlap glyphs). The inflated region fully contains
+    # them; the rendered page is identical (fills clip to the page), so the
+    # blackout invariant is solid black AND zero extractable chars.
     for pg_num in sorted(blackout_set):
         if not (0 <= pg_num < len(doc)):
             continue
         page = doc[pg_num]
         rect = Rect(page.rect)
         if page.rotation:
-            rect = rect * page.derotation_matrix
-            rect.normalize()
-            mb = page.mediabox
-            rect = Rect(rect.x0 + mb.x0, rect.y0 - mb.y0,
-                        rect.x1 + mb.x0, rect.y1 - mb.y0)
+            rect = _derotate_to_native(rect, page)
+        rect = Rect(rect.x0 - _EDGE_OVERSCAN, rect.y0 - _EDGE_OVERSCAN,
+                    rect.x1 + _EDGE_OVERSCAN, rect.y1 + _EDGE_OVERSCAN)
         page.add_redact_annot(rect, fill=(0, 0, 0))
         page.apply_redactions()
 
