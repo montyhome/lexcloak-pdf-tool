@@ -248,3 +248,137 @@ def test_no_form_pdf_redaction_unaffected():
         assert list(odoc[0].widgets()) == []
     finally:
         odoc.close()
+
+
+# ── Catalog-orphan widgets (v0.6.2, Sessions 659/660) ────────────────
+#
+# Page-level /Widget annotations never registered in a document /AcroForm
+# dictionary: ``doc.is_form_pdf`` is FALSE, so the v0.5.2 flatten guard
+# skipped the bake and every widget /V survived a "redacted" export
+# (Session 660 forensics: a live packaged-app export shipped 46 live
+# widgets, 9 carrying values, off a generator-produced tax form; real
+# authority-published forms register fields and were never exposed).
+# ``doc.bake`` handles the orphan shape correctly once called — the fix is
+# guard-widening only (``_has_any_widget`` page-annot scan).
+
+KEEP_VALUE = "RETAINED-VALUE-9911"
+KEEP_RECT = (100.0, 300.0, 400.0, 330.0)
+
+
+def _make_orphan_widget_pdf(page_rotate: int = 0) -> bytes:
+    """Two orphan text widgets (PII + keep) plus static anchor text; the
+    catalog /AcroForm key is nulled AFTER add_widget so the widgets stay in
+    the page /Annots but vanish from the document form tree — the
+    generator/form-filler output shape."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text(fitz.Point(100, 90), "STATIC anchor text", fontsize=11)
+    page.add_widget(_text_widget("pii_field", FIELD_PII, WIDGET_RECT))
+    page.add_widget(_text_widget("keep_field", KEEP_VALUE, KEEP_RECT))
+    doc.xref_set_key(doc.pdf_catalog(), "AcroForm", "null")
+    if page_rotate:
+        doc[0].set_rotation(page_rotate)
+    out = doc.tobytes()
+    doc.close()
+    return out
+
+
+def test_orphan_premise_is_form_pdf_false_but_widgets_present():
+    """Premise pin: the fixture really is orphan-shaped — is_form_pdf FALSE
+    with live page widgets whose values extract. If this ever fails, the
+    orphan tests below are no longer testing the orphan class."""
+    doc = fitz.open(stream=_make_orphan_widget_pdf(), filetype="pdf")
+    try:
+        assert not doc.is_form_pdf
+        assert len(list(doc[0].widgets())) == 2
+        assert SSN in doc[0].get_text()
+    finally:
+        doc.close()
+
+
+def test_orphan_widget_value_redacted_from_text_and_bytes():
+    """The Session 660 leak class, closed at the engine: a burn over an
+    ORPHAN widget's rect removes the value from get_text() AND raw bytes,
+    and no interactive widget survives anywhere in the output."""
+    pdf = _make_orphan_widget_pdf()
+    out, _ = apply_redactions(pdf, [_match_for(WIDGET_RECT)])
+    assert SSN.encode() not in out
+    assert NAME.encode() not in out
+    assert b"/Widget" not in out
+    doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        text = doc[0].get_text()
+        assert SSN not in text
+        assert "STATIC anchor text" in text     # unrelated content intact
+        assert list(doc[0].widgets()) == []
+    finally:
+        doc.close()
+
+
+def test_orphan_unredacted_field_retained_as_static_text():
+    """Keep-values contract on the orphan shape: an un-redacted orphan
+    field's value survives — as STATIC page text (selectable/copyable),
+    not as a live widget."""
+    pdf = _make_orphan_widget_pdf()
+    out, _ = apply_redactions(pdf, [_match_for(WIDGET_RECT)])
+    doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        assert KEEP_VALUE in doc[0].get_text()
+        assert list(doc[0].widgets()) == []
+    finally:
+        doc.close()
+    assert b"/Widget" not in out
+
+
+import pytest as _pytest  # local alias; module otherwise pytest-free
+
+
+@_pytest.mark.parametrize("page_rotate", [0, 90])
+def test_orphan_page_blackout_scrubs_widget_values(page_rotate):
+    """The blackout branch on orphan-widget pages (fold item 2): zero
+    extractable chars, no /Widget tokens, page renders solid black —
+    including with a /Rotate flag."""
+    pdf = _make_orphan_widget_pdf(page_rotate)
+    out, _ = apply_redactions(pdf, [], blackout_pages=[0])
+    assert SSN.encode() not in out
+    assert KEEP_VALUE.encode() not in out
+    assert b"/Widget" not in out
+    doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        assert doc[0].get_text().strip() == ""
+    finally:
+        doc.close()
+    w, h = (792, 612) if page_rotate in (90, 270) else (612, 792)
+    assert _is_dark_at(out, 0, w * 0.5, h * 0.5)
+    assert _is_dark_at(out, 0, 15, 15)
+
+
+def test_no_widget_doc_never_calls_bake(monkeypatch):
+    """Fast-path guard: a widget-free document must skip doc.bake entirely
+    (byte-identical pre-v0.5.2 path). The counter wraps the REAL bake so a
+    widget doc still flattens through it — mock integrity."""
+    calls = {"n": 0}
+    real_bake = fitz.Document.bake
+
+    def counting_bake(self, *args, **kwargs):
+        calls["n"] += 1
+        return real_bake(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Document, "bake", counting_bake)
+
+    doc = fitz.open()
+    doc.new_page(width=612, height=792).insert_text(
+        fitz.Point(50, 100), f"Patient SSN {SSN}", fontsize=12)
+    pdf = doc.tobytes()
+    doc.close()
+    out, _ = apply_redactions(pdf, [_match_for((30, 80, 300, 120),
+                                               type_="SSN")])
+    assert calls["n"] == 0, "widget-free doc unexpectedly hit doc.bake"
+    assert SSN.encode() not in out
+
+    # …and the same wrapper counts 1 for an orphan doc (the widened guard
+    # actually routes through bake).
+    out2, _ = apply_redactions(_make_orphan_widget_pdf(),
+                               [_match_for(WIDGET_RECT)])
+    assert calls["n"] == 1
+    assert SSN.encode() not in out2

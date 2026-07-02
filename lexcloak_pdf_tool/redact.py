@@ -121,6 +121,29 @@ def strip_metadata(pdf_bytes_or_doc):
     return None
 
 
+def _has_any_widget(doc) -> bool:
+    """True if any page carries a ``/Widget`` annotation.
+
+    ``doc.is_form_pdf`` alone false-negatives on CATALOG-ORPHAN widgets --
+    page-level /Widget annotations never registered in a document /AcroForm
+    dictionary (form-filler / generator output; Session 660 found a whole
+    synthetic tax corpus orphan-shaped, and a live packaged-app export
+    shipped all 46 widget values because the flatten guard skipped). Real
+    authority-published forms register their fields and ARE seen by
+    ``is_form_pdf``; the orphan shape is the residual exposure class.
+    ``doc.bake`` flattens orphan widgets correctly once actually called
+    (verified empirically, both pymupdf lines) -- detection was the only
+    gap. The scan reads each page's annotation-xref list (no widget objects
+    are loaded), so the common no-widget document pays one cheap /Annots
+    array read per page.
+    """
+    for page in doc:
+        for entry in page.annot_xrefs():
+            if entry[1] == _fitz.PDF_ANNOT_WIDGET:
+                return True
+    return False
+
+
 def _flatten_form_fields(doc) -> None:
     """Flatten AcroForm widget fields into static page content.
 
@@ -142,12 +165,16 @@ def _flatten_form_fields(doc) -> None:
     correct shape for a final redacted artifact (an interactive form can carry
     hidden values, scripts, and reset actions a redacted output must not ship).
 
-    Guarded by ``is_form_pdf`` so the overwhelmingly-common no-form PDF takes
-    the identical, byte-for-byte-unchanged path. ``annots=False`` leaves
-    non-widget annotations untouched -- annotation-borne text is a distinct
-    surface, out of scope for this AcroForm fix.
+    Guarded by ``is_form_pdf`` OR a per-page widget scan so the
+    overwhelmingly-common no-widget PDF takes the identical,
+    byte-for-byte-unchanged path. The scan half exists because
+    ``is_form_pdf`` false-negatives on catalog-orphan widgets (v0.6.2,
+    Sessions 659/660 -- see ``_has_any_widget``); ``is_form_pdf`` runs first
+    as the cheap short-circuit for well-formed forms. ``annots=False``
+    leaves non-widget annotations untouched -- annotation-borne text is a
+    distinct surface, out of scope for this AcroForm fix.
     """
-    if not doc.is_form_pdf:
+    if not (doc.is_form_pdf or _has_any_widget(doc)):
         return
     # bake(annots=False, widgets=True): flatten only interactive form widgets.
     doc.bake(annots=False, widgets=True)
