@@ -45,14 +45,16 @@ as a clean exit.
   "op": "render" | "extract_native" | "extract_ocr"
        | "extract_text_dict" | "extract_text_plain"
        | "search_for" | "apply_redactions" | "strip_metadata"
+       | "set_metadata" | "insert_cover_page" | "reduce_size"
        | "page_count" | "page_size" | "all_page_sizes"
-       | "is_encrypted" | "get_metadata" | "decrypt"
+       | "is_encrypted" | "get_metadata" | "decrypt" | "encrypt"
        | "open_doc" | "close_doc"
        | "render_h" | "extract_native_h" | "extract_ocr_h"
        | "extract_text_dict_h" | "extract_text_plain_h"
        | "search_for_h" | "apply_redactions_h" | "strip_metadata_h"
+       | "set_metadata_h" | "insert_cover_page_h" | "reduce_size_h"
        | "page_count_h" | "page_size_h" | "all_page_sizes_h"
-       | "is_encrypted_h" | "get_metadata_h"
+       | "is_encrypted_h" | "get_metadata_h" | "encrypt_h"
        | "exit",
   ...op-specific fields (see below)
 }
@@ -65,6 +67,8 @@ upgrade — the subprocess advertises 4 in its handshake but accepts 2/3
 on the wire. `decrypt` deliberately has no `_h` variant: decryption
 always operates on raw bytes (returns cleartext), and the caller's
 handle-based workflow opens a fresh handle on the cleartext result.
+`encrypt` (its symmetric counterpart) *does* have an `encrypt_h` — it is
+a terminal save step, so encrypting an already-open handle is natural.
 
 ## Response schema
 
@@ -304,6 +308,29 @@ instance stays alive, caller can retry with a different password).
 Unencrypted input is re-saved cleanly with the password ignored
 (defensive path).
 
+### `encrypt`
+
+AES-256 encrypt a **cleartext** PDF under a password — the encrypt-on-exit
+counterpart to `decrypt`. The Lex Cloak route calls it as the final pipeline
+step, after redaction + Spec 13/14 stamping, so those steps always operate on
+cleartext.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required |
+| `password` | string | `""` |
+
+**Result:** `{"pdf_b64": str, "protection_applied": bool}`.
+
+`protection_applied` is `true` iff the encrypted save succeeded. An **empty
+password** is a no-op that returns the input bytes unchanged with
+`protection_applied: false`. A PyMuPDF save failure degrades to unprotected
+output (`protection_applied: false`) rather than raising — a failed encryption
+never blocks the download (shares the fallback with `apply_redactions`).
+**Already-encrypted input** returns `error_type: "ValueError"` (the op requires
+cleartext; authenticate with `decrypt` first). Permissions are locked to
+accessibility-only, matching `apply_redactions`' re-encrypt path.
+
 ### `reduce_size`
 
 Shrink a (cleartext) PDF locally. Lossless by default (orphan/metadata
@@ -374,17 +401,35 @@ The following ops accept `handle` (string, required) instead of `pdf_b64`:
 | `all_page_sizes` | `all_page_sizes_h` | `{"sizes": [[w, h], ...]}` |
 | `is_encrypted` | `is_encrypted_h` | `{"encrypted": bool}` |
 | `get_metadata` | `get_metadata_h` | `{"metadata": dict, "has_xmp": bool}` |
+| `set_metadata` | `set_metadata_h` | `{"pdf_b64": str}` |
+| `insert_cover_page` | `insert_cover_page_h` | `{"pdf_b64": str}` |
 | `reduce_size` | `reduce_size_h` | `{"pdf_b64": str, "info": {...}}` |
+| `encrypt` | `encrypt_h` | `{"pdf_b64": str, "protection_applied": bool}` |
 
 Calling a handle op with a missing, closed, or non-string `handle` field
 returns `error_type: "HandleNotFound"`. Distinct from `ProtocolError` so
 clients can distinguish "subprocess crashed" (instance broken — respawn)
 from "handle stale" (subprocess fine — reopen via `open_doc`).
 
-`apply_redactions_h`, `strip_metadata_h`, and `reduce_size_h` mutate the
-cached doc in place; subsequent reads on the same handle reflect the
-mutation. Callers that need to preserve the original should keep their own
-`pdf_bytes` reference.
+`apply_redactions_h`, `strip_metadata_h`, `set_metadata_h`,
+`insert_cover_page_h`, and `reduce_size_h` mutate the cached doc in place;
+subsequent reads on the same handle reflect the mutation. `encrypt_h` is the
+exception: PyMuPDF applies encryption at save time, so the cached doc stays
+cleartext and reusable after an `encrypt_h` call. Callers that need to
+preserve a mutated original should keep their own `pdf_bytes` reference.
+
+## CLI flags
+
+The binary is normally driven entirely over the stdin/stdout frame protocol,
+but one out-of-band flag is recognized before the loop starts:
+
+* `--version` — print the package version (a bare `MAJOR.MINOR.PATCH` semver)
+  to **stdout** and exit `0`, without reading a single protocol frame. The
+  closed app probes this to confirm the bundled subprocess matches the pinned
+  release tag. It reads stdout only — the startup banner (below) is on stderr
+  and carries `pymupdf_version`, which must not be mistaken for the package
+  version. The version is sourced from the installed distribution metadata,
+  falling back to the packaged `__version__` in the frozen binary.
 
 ## Observability
 
@@ -432,3 +477,5 @@ shipping client has caught up.
 | 0.3.0 | 3 | Adds `all_page_sizes` batch op (14 ops). v2 stays supported for backward compat during closed-app rolling upgrade. |
 | 0.4.0 | 4 | Adds stateful handle protocol (`open_doc` + `close_doc` + 13 `_h` per-op variants, 29 ops total). Subprocess holds parsed `fitz.Document` instances keyed by UUID handle with LRU eviction (cache size 16). v2 + v3 stay supported during the rolling closed-app upgrade. `decrypt` has no `_h` variant by design — decryption is byte-in/byte-out, then callers open a fresh handle on the cleartext. |
 | 0.6.0 | 4 | Adds `reduce_size` op (+ `reduce_size_h`) for local PDF compression: lossless scrub + font subset, opt-in DPI image downsample, no-grow guard, cleartext-only. Additive — no protocol bump; v2–v4 unaffected. Doc gap: the 0.5.0–0.5.4 op additions (`set_metadata`, `insert_cover_page`, `blackout_pages`) predate this row and are not yet captured in the per-op contracts above. |
+| 0.6.1–0.6.2 | 4 | Patch fixes (redaction sliver + AcroForm widget-flatten guard-widen). No new ops. |
+| 0.6.3 | 4 | Adds `encrypt` op (+ `encrypt_h`) — AES-256 encrypt-on-exit, the symmetric counterpart to `decrypt`; and a `--version` CLI flag (bare semver on stdout). Additive — no protocol bump. The encrypted-save block is now shared with `apply_redactions` via `redact._save_encrypted`. The enum + `_h` table above are brought current as of this row (the earlier 0.5.x/0.6.0 op names were backfilled here). |

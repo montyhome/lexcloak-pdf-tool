@@ -29,6 +29,9 @@ of the same name.
 * ``set_metadata``          -- merge metadata fields, preserving the rest.
 * ``insert_cover_page``     -- insert a "review required" cover page at index 0.
 * ``decrypt_pdf``           -- authenticate password-protected PDFs.
+* ``encrypt``               -- AES-256 encrypt cleartext bytes under a password
+                               (the encrypt-on-exit half of the decrypt/encrypt
+                               pipeline bracket).
 * ``reduce_size``           -- local size reduction: scrub + font subset +
                                optional DPI image downsample (opt-in, lossy).
 
@@ -41,6 +44,14 @@ import fitz as _fitz
 
 
 version = _fitz.version
+
+#: Package version -- the single source of truth. ``pyproject.toml`` derives
+#: its version from this attribute (setuptools dynamic ``version = {attr =
+#: "lexcloak_pdf_tool.__version__"}``), and the CLI ``--version`` flag falls
+#: back to it when ``importlib.metadata`` has no dist-info to read (e.g. inside
+#: the frozen PyInstaller bundle). Keep it a plain string literal so
+#: setuptools can extract it statically without importing this module.
+__version__ = "0.6.3"
 
 
 def pymupdf_version() -> str:
@@ -58,7 +69,7 @@ from .extract import (  # noqa: E402
 )
 from .redact import apply_redactions, strip_metadata  # noqa: E402
 from .cover_page import insert_cover_page  # noqa: E402
-from .encryption import decrypt_pdf, WrongPasswordError  # noqa: E402
+from .encryption import decrypt_pdf, encrypt, WrongPasswordError  # noqa: E402
 from .reduce_size import reduce_size  # noqa: E402
 from .metadata import (  # noqa: E402
     page_count,
@@ -79,6 +90,7 @@ from .coords import (  # noqa: E402
 
 __all__ = [
     "version",
+    "__version__",
     "pymupdf_version",
     # IPC-clean ops (all wired to the CLI dispatch)
     "render_page",
@@ -97,6 +109,7 @@ __all__ = [
     "set_metadata",
     "insert_cover_page",
     "decrypt_pdf",
+    "encrypt",
     "WrongPasswordError",
     "reduce_size",
     # Library-only CharData helpers

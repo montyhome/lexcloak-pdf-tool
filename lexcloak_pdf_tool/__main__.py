@@ -38,6 +38,7 @@ from lexcloak_pdf_tool import (
     all_page_sizes,
     apply_redactions,
     decrypt_pdf,
+    encrypt,
     extract_text_dict,
     extract_text_native,
     extract_text_ocr,
@@ -78,6 +79,7 @@ from lexcloak_pdf_tool.metadata import (
 )
 from lexcloak_pdf_tool.redact import (
     _apply_redactions_doc,
+    _save_encrypted,
     _strip_metadata_doc,
     open_pdf,
 )
@@ -475,6 +477,19 @@ def _op_decrypt(cmd: dict) -> dict:
     }
 
 
+def _op_encrypt(cmd: dict) -> dict:
+    pdf_bytes = _decode_pdf(cmd)
+    password = cmd.get("password", "")
+    # ``encrypt`` validates the password type (raises ValueError -> _err) and
+    # rejects already-encrypted input; empty password is a no-op returning the
+    # bytes unchanged with protection_applied=False.
+    out_bytes, protection_applied = encrypt(pdf_bytes, password)
+    return {
+        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        "protection_applied": bool(protection_applied),
+    }
+
+
 # ── Stateful handle ops (v4) ─────────────────────────────────────────
 
 
@@ -705,6 +720,37 @@ def _op_reduce_size_h(cmd: dict) -> dict:
     }
 
 
+def _op_encrypt_h(cmd: dict) -> dict:
+    """AES-256 encrypt the cached doc + return its bytes.
+
+    Unlike the other ``_h`` save ops (``set_metadata_h`` / ``reduce_size_h``)
+    this does NOT mutate the cached document -- PyMuPDF applies encryption at
+    save time, so the handle's in-memory doc stays cleartext and reusable.
+    Empty password is a no-op returning cleartext bytes + ``protection_applied
+    =False``; already-encrypted input is rejected (the pipeline only encrypts
+    cleartext).
+    """
+    doc = _resolve_handle(_get_handle(cmd))
+    password = cmd.get("password", "")
+    if not isinstance(password, str):
+        raise ValueError(
+            f"password must be a string, got {type(password).__name__}"
+        )
+    if doc.is_encrypted and doc.needs_pass:
+        raise ValueError(
+            "encrypt() input must be cleartext; use decrypt_pdf() to "
+            "authenticate first"
+        )
+    if not password:
+        out_bytes, protection_applied = _save_doc_bytes(doc), False
+    else:
+        out_bytes, protection_applied = _save_encrypted(doc, password)
+    return {
+        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        "protection_applied": bool(protection_applied),
+    }
+
+
 _OPS = {
     # v2/v3 stateless ops
     "render": _op_render,
@@ -724,6 +770,7 @@ _OPS = {
     "is_encrypted": _op_is_encrypted,
     "get_metadata": _op_get_metadata,
     "decrypt": _op_decrypt,
+    "encrypt": _op_encrypt,
     # v4 stateful handle ops
     "open_doc": _op_open_doc,
     "close_doc": _op_close_doc,
@@ -743,6 +790,7 @@ _OPS = {
     "set_metadata_h": _op_set_metadata_h,
     "insert_cover_page_h": _op_insert_cover_page_h,
     "reduce_size_h": _op_reduce_size_h,
+    "encrypt_h": _op_encrypt_h,
 }
 
 
@@ -782,8 +830,38 @@ def _handle(cmd: dict) -> dict | None:
         return _err(exc)
 
 
+def _package_version() -> str:
+    """Return the ``lexcloak-pdf-tool`` package version.
+
+    Prefers the installed distribution metadata (``importlib.metadata``, which
+    derives from ``pyproject.toml``); falls back to the package ``__version__``
+    literal when no dist-info is present -- the frozen PyInstaller bundle
+    collects the module code but not the ``.dist-info`` directory.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            return version("lexcloak-pdf-tool")
+        except PackageNotFoundError:
+            pass
+    except ImportError:  # pragma: no cover -- importlib.metadata is stdlib on 3.12
+        pass
+    from lexcloak_pdf_tool import __version__
+    return __version__
+
+
 def main() -> int:
     """Run the CLI loop: read frame -> dispatch -> write frame -> repeat."""
+    # ``--version`` short-circuit: print the package version to STDOUT and exit
+    # before the length-prefixed JSON loop. The closed app's
+    # ``emit_compat_manifest.py`` probes this to confirm the bundled subprocess
+    # matches the pinned tag (Session 354 + 342). STDOUT only, bare semver --
+    # the stderr startup banner below carries pymupdf_version and must never be
+    # parsed as the app version (regression-locked downstream).
+    if "--version" in sys.argv[1:]:
+        print(_package_version())
+        return 0
+
     # Force binary mode on stdin/stdout so newline translation doesn't
     # corrupt PNG/PDF/length-prefix bytes on Windows.
     stdin = sys.stdin.buffer

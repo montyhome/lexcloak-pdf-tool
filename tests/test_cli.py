@@ -827,6 +827,148 @@ def test_decrypt_non_string_password_returns_value_error():
     assert "password" in resp["error"].lower()
 
 
+# ── encrypt (Session 342) ────────────────────────────────────────────
+
+
+def test_encrypt_roundtrip_stateless():
+    """The stateless encrypt op AES-256 protects a cleartext PDF; the output
+    authenticates with the supplied password."""
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    with CLISession() as s:
+        resp = s.call("encrypt", pdf_b64=_b64(pdf), password="pw-123")
+    assert resp["ok"] is True
+    assert resp["result"]["protection_applied"] is True
+    out = base64.b64decode(resp["result"]["pdf_b64"])
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    assert out_doc.is_encrypted
+    assert out_doc.authenticate("pw-123") > 0
+    out_doc.close()
+
+
+def test_encrypt_empty_password_noop_returns_cleartext():
+    """Empty password is a no-op: protection_applied False + openable output."""
+    pdf = _make_pdf("Unprotected")
+    with CLISession() as s:
+        resp = s.call("encrypt", pdf_b64=_b64(pdf), password="")
+    assert resp["ok"] is True
+    assert resp["result"]["protection_applied"] is False
+    out = base64.b64decode(resp["result"]["pdf_b64"])
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    assert not (out_doc.is_encrypted and out_doc.needs_pass)
+    out_doc.close()
+
+
+def test_encrypt_rejects_already_encrypted_input():
+    """Encrypted input surfaces a structured ValueError naming the cleartext
+    invariant; the subprocess stays alive for the next op."""
+    pdf = _make_encrypted_pdf("secret")
+    with CLISession() as s:
+        resp = s.call("encrypt", pdf_b64=_b64(pdf), password="new-pw")
+        followup = s.call("page_count", pdf_b64=_b64(_make_pdf()))
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "cleartext" in resp["error"].lower()
+    assert followup["ok"] is True
+
+
+def test_encrypt_non_string_password_returns_value_error():
+    """Password must be a string; a non-string surfaces a structured error."""
+    with CLISession() as s:
+        s.write_frame({
+            "protocol_version": PROTOCOL_VERSION,
+            "op": "encrypt",
+            "pdf_b64": _b64(_make_pdf()),
+            "password": 12345,
+        })
+        resp = s.read_frame()
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+    assert "password" in resp["error"].lower()
+
+
+def test_encrypt_two_calls_same_session_serialize():
+    """Wire-lock: the subprocess handles two encrypt calls back-to-back on one
+    session (one frame at a time), staying alive across both."""
+    pdf = _make_pdf("Body")
+    with CLISession() as s:
+        first = s.call("encrypt", pdf_b64=_b64(pdf), password="pw-a")
+        second = s.call("encrypt", pdf_b64=_b64(pdf), password="pw-b")
+    assert first["ok"] is True and second["ok"] is True
+    d1 = fitz.open(stream=base64.b64decode(first["result"]["pdf_b64"]),
+                   filetype="pdf")
+    d2 = fitz.open(stream=base64.b64decode(second["result"]["pdf_b64"]),
+                   filetype="pdf")
+    assert d1.authenticate("pw-a") > 0 and d2.authenticate("pw-b") > 0
+    d1.close()
+    d2.close()
+
+
+def test_encrypt_handle_roundtrip_leaves_cached_doc_cleartext():
+    """The handle encrypt op returns encrypted bytes but does NOT mutate the
+    cached doc (encryption is a save param) -- a follow-up op on the same
+    handle still sees cleartext."""
+    pdf = _make_pdf("Handle body", n_pages=2)
+    with CLISession() as s:
+        handle = _open(s, pdf)
+        resp = s.call("encrypt_h", handle=handle, password="pw-h")
+        # The cached doc is untouched: a subsequent op still works on cleartext.
+        followup = s.call("page_count_h", handle=handle)
+    assert resp["ok"] is True
+    assert resp["result"]["protection_applied"] is True
+    out_doc = fitz.open(stream=base64.b64decode(resp["result"]["pdf_b64"]),
+                        filetype="pdf")
+    assert out_doc.authenticate("pw-h") > 0
+    out_doc.close()
+    assert followup["ok"] is True
+    assert followup["result"]["count"] == 2
+
+
+# ── --version flag (Session 342 / 354 rider) ─────────────────────────
+# emit_compat_manifest.py in the closed app runs ``[binary, "--version"]`` and
+# parses the semver off STDOUT to verify the bundled subprocess matches the
+# pinned tag. These lock that contract (stdout-only, bare semver, exit 0, no
+# JSON frame, no startup banner).
+
+# The exact regex emit_compat_manifest._parse_pdf_tool_version applies to stdout.
+_COMPAT_MANIFEST_VERSION_RE = r"(?<![\w.])(\d+\.\d+\.\d+)"
+
+
+def _run_version_flag() -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "lexcloak_pdf_tool", "--version"],
+        capture_output=True, timeout=30,
+    )
+
+
+def test_version_flag_prints_semver_to_stdout_and_exits_zero():
+    import re
+    proc = _run_version_flag()
+    assert proc.returncode == 0
+    stdout = proc.stdout.decode("utf-8").strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", stdout), f"not a bare semver: {stdout!r}"
+    # The closed-app probe's regex must match this stdout.
+    assert re.search(_COMPAT_MANIFEST_VERSION_RE, stdout)
+
+
+def test_version_flag_matches_package_version():
+    from lexcloak_pdf_tool import __version__
+    proc = _run_version_flag()
+    assert proc.stdout.decode("utf-8").strip() == __version__
+
+
+def test_version_flag_writes_no_json_frame_and_no_startup_banner():
+    """--version short-circuits before the length-prefixed loop: stdout is the
+    bare semver (no 4-byte length prefix), and the stderr startup banner that
+    the normal path emits is absent."""
+    proc = _run_version_flag()
+    stdout = proc.stdout
+    # A JSON frame would be a 4-byte big-endian length prefix + ``{`` (0x7b);
+    # a bare semver line starts with an ASCII digit instead.
+    assert stdout[:1].isdigit()
+    stderr = proc.stderr.decode("utf-8")
+    assert "starting protocol_version" not in stderr
+
+
 # ── Tesseract-dependent (skipped when unavailable) ──────────────────
 
 

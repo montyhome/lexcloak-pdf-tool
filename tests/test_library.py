@@ -23,6 +23,7 @@ import pytest
 from lexcloak_pdf_tool import (
     all_page_sizes,
     apply_redactions,
+    encrypt,
     extract_text_native,
     insert_cover_page,
     is_encrypted,
@@ -188,6 +189,100 @@ def test_is_encrypted_real_password():
     # PyMuPDF auto-authenticates empty-password PDFs silently, so only a
     # real-password PDF surfaces as is_encrypted=True here.
     assert is_encrypted(_make_encrypted_pdf("secret123")) is True
+
+
+# ── encrypt (Session 342) ────────────────────────────────────────────
+# The encrypt-on-exit half of the decrypt/encrypt pipeline bracket. Mirrors
+# reduce_size's cleartext-only invariant + apply_redactions's save-failure
+# fallback. Shares the AES-256 save block with apply_redactions via
+# redact._save_encrypted, so a params drift here would fail both paths.
+
+
+def test_encrypt_valid_password_round_trips():
+    """A valid password produces AES-256 output that authenticates with the
+    right password and rejects a wrong one; content survives."""
+    clear = _make_pdf("Patient SSN 123-45-6789")
+    out, applied = encrypt(clear, "pw-123")
+    assert applied is True
+    assert out[:4] == b"%PDF"
+    # Right password unlocks.
+    d = fitz.open(stream=out, filetype="pdf")
+    assert d.is_encrypted
+    assert d.authenticate("pw-123") > 0
+    assert "123-45-6789" in d[0].get_text()
+    d.close()
+    # Wrong password fails on a fresh open (authenticate is one-shot).
+    d2 = fitz.open(stream=out, filetype="pdf")
+    assert d2.authenticate("WRONG") == 0
+    d2.close()
+
+
+def test_encrypt_empty_password_is_noop_returns_input_unchanged():
+    """Empty password is a no-op: the exact input bytes come back, byte-for-
+    byte, with protection_applied=False (never a re-saved copy)."""
+    clear = _make_pdf("Unprotected")
+    out, applied = encrypt(clear, "")
+    assert applied is False
+    assert out is clear or out == clear
+
+
+def test_encrypt_non_ascii_password_round_trips():
+    """A non-ASCII (Unicode) password authenticates correctly."""
+    clear = _make_pdf("Dossier")
+    pw = "clé-secrète-Ünïcödé-🔒"
+    out, applied = encrypt(clear, pw)
+    assert applied is True
+    d = fitz.open(stream=out, filetype="pdf")
+    assert d.authenticate(pw) > 0
+    d.close()
+
+
+def test_encrypt_large_multipage_pdf_round_trips():
+    """A large multi-page document encrypts + authenticates without loss."""
+    clear = _make_pdf("Page body text", n_pages=50)
+    out, applied = encrypt(clear, "big-doc-pw")
+    assert applied is True
+    d = fitz.open(stream=out, filetype="pdf")
+    assert d.authenticate("big-doc-pw") > 0
+    assert d.page_count == 50
+    d.close()
+
+
+def test_encrypt_save_failure_falls_back_to_unprotected(monkeypatch):
+    """A PyMuPDF failure on the *encrypted* save degrades to unprotected
+    output (protection_applied=False) rather than raising -- a failed
+    encryption must never block the download. The fallback clean-save
+    still succeeds, so content survives."""
+    clear = _make_pdf("Fallback body")
+    real_save = fitz.Document.save
+
+    def flaky_save(self, *args, **kwargs):
+        # Only the encrypted save (carries an ``encryption`` kwarg) fails;
+        # the unprotected fallback save passes through.
+        if kwargs.get("encryption"):
+            raise RuntimeError("simulated encrypted-save failure")
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(fitz.Document, "save", flaky_save)
+    out, applied = encrypt(clear, "pw-that-cannot-apply")
+    assert applied is False
+    d = fitz.open(stream=out, filetype="pdf")
+    assert not (d.is_encrypted and d.needs_pass)  # unprotected fallback
+    assert "Fallback body" in d[0].get_text()
+    d.close()
+
+
+def test_encrypt_rejects_already_encrypted_input():
+    """Encrypted input is a programming error -- the pipeline only ever feeds
+    cleartext into encrypt. Raises ValueError naming the cleartext invariant."""
+    with pytest.raises(ValueError, match="cleartext"):
+        encrypt(_make_encrypted_pdf("secret123"), "new-pw")
+
+
+def test_encrypt_non_string_password_raises():
+    """Password must be a string; a non-string raises a named ValueError."""
+    with pytest.raises(ValueError, match="password"):
+        encrypt(_make_pdf(), 12345)
 
 
 def test_open_corrupt_pdf_raises():
