@@ -243,6 +243,48 @@ def _derotate_to_native(rect, page):
                 rect.x1 + mb.x0, rect.y1 - mb.y0)
 
 
+def _save_clean(doc) -> bytes:
+    """Serialize ``doc`` to unencrypted bytes with the standard save params."""
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True, clean=True)
+    return buf.getvalue()
+
+
+def _save_encrypted(doc, password: str) -> tuple[bytes, bool]:
+    """Save ``doc`` AES-256 encrypted under ``password``; return ``(bytes, applied)``.
+
+    Assumes a non-empty ``password`` and cleartext input -- callers guard both.
+    On any PyMuPDF save failure the encryption is dropped and the document is
+    re-saved unprotected, returning ``protection_applied=False``: a failed
+    encryption must never block the redacted download. The warning logs the
+    exception *type* only -- never the password, never ``str(exc)``.
+
+    Shared by ``_apply_redactions_doc`` (the library-back-compat re-encrypt
+    path) and :func:`lexcloak_pdf_tool.encryption.encrypt` (the standalone
+    ``encrypt`` op) so the two cannot drift on save params or fallback
+    behaviour (Session 342, Risk 2).
+    """
+    buf = io.BytesIO()
+    try:
+        doc.save(
+            buf,
+            garbage=4,
+            deflate=True,
+            clean=True,
+            encryption=PDF_ENCRYPT_AES_256,
+            user_pw=password,
+            owner_pw=password,
+            permissions=int(PDF_PERM_ACCESSIBILITY),
+        )
+        return buf.getvalue(), True
+    except Exception as exc:  # noqa: BLE001 -- degrade to unprotected, never block
+        logging.getLogger(__name__).warning(
+            "PDF encryption failed; saving unprotected. exception_type=%s",
+            type(exc).__name__,
+        )
+        return _save_clean(doc), False
+
+
 def _apply_redactions_doc(doc, matches: list[dict],
                           redact_label: str = "",
                           active_categories: list[str] | set[str] | None = None,
@@ -376,46 +418,23 @@ def _apply_redactions_doc(doc, matches: list[dict],
 
     _strip_metadata_doc(doc)
 
-    buf = io.BytesIO()
     mode = (output_protection or {}).get("mode") if output_protection else None
 
     if output_protection is None or mode == "none":
-        doc.save(buf, garbage=4, deflate=True, clean=True)
-        protection_applied = True
+        out_bytes, protection_applied = _save_clean(doc), True
     elif mode in ("same", "new"):
         password = output_protection.get("password") or ""
         if not password:
-            doc.save(buf, garbage=4, deflate=True, clean=True)
-            protection_applied = False
+            out_bytes, protection_applied = _save_clean(doc), False
         else:
-            try:
-                doc.save(
-                    buf,
-                    garbage=4,
-                    deflate=True,
-                    clean=True,
-                    encryption=PDF_ENCRYPT_AES_256,
-                    user_pw=password,
-                    owner_pw=password,
-                    permissions=int(PDF_PERM_ACCESSIBILITY),
-                )
-                protection_applied = True
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "Re-encryption failed; saving unprotected. exception_type=%s",
-                    type(exc).__name__,
-                )
-                buf = io.BytesIO()
-                doc.save(buf, garbage=4, deflate=True, clean=True)
-                protection_applied = False
+            out_bytes, protection_applied = _save_encrypted(doc, password)
     else:
         logging.getLogger(__name__).warning(
             "apply_redactions: unknown output_protection mode; saving unprotected."
         )
-        doc.save(buf, garbage=4, deflate=True, clean=True)
-        protection_applied = False
+        out_bytes, protection_applied = _save_clean(doc), False
 
-    return buf.getvalue(), protection_applied
+    return out_bytes, protection_applied
 
 
 def apply_redactions(pdf_bytes: bytes, matches: list[dict],
