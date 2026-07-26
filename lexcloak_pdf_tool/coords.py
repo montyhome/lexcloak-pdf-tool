@@ -133,7 +133,7 @@ def search_in_chars(needle: str, chars: list) -> list:
     return rects
 
 
-# ── token-boundary rule (v0.6.4) ────────────────────────────────────────
+# ── numeric token-boundary rule (opt-in; v0.6.4 rule, v0.6.5 flag) ──────
 #
 # ``.``, ``-`` and ``/`` are word boundaries in prose ("end. Next", "opt-in",
 # "and/or") but INTRA-NUMBER SEPARATORS inside a number ("18-12-107.5",
@@ -152,6 +152,15 @@ def search_in_chars(needle: str, chars: list) -> list:
 # hyphenated surname is a real occurrence of the name. A digit fragment has
 # no such claim -- ``12`` inside ``18-12-107.5`` is coincidence, never the
 # datum.
+#
+# OPT-IN, and the default is the historical looser rule. Whether a numeric
+# fragment is noise depends on where the needle CAME FROM, which only the
+# caller knows. A needle a detector inferred is worth tightening. A needle a
+# human typed is not: someone who asks to redact "12" may well mean every
+# 12, and in a redaction tool an unwanted box costs one click while a missed
+# one leaks. v0.6.4 briefly made the tightened rule unconditional, which
+# silently changed both kinds of caller; v0.6.5 puts the choice back where
+# the provenance is known.
 _NUMERIC_SEPARATORS = frozenset({".", "-", "/"})
 
 # Digits, optionally joined by intra-number separators: "12", "4", "107.5",
@@ -204,17 +213,27 @@ def _occurrence_is_whole_token(text: str, idx: int, end: int,
     return True
 
 
-def search_whole_word_in_chars(needle: str, chars: list) -> list:
-    """Whole-token search in character data -- filters out substring hits.
+def search_whole_word_in_chars(needle: str, chars: list,
+                               *,
+                               numeric_token_boundary: bool = False) -> list:
+    """Whole-word search in character data -- filters out substring hits.
 
     Equivalent to a word-boundary-respecting search using pre-extracted
     chars. Word-boundary semantics match the ``\\w`` regex class --
     rejects matches whose preceding or following character is
-    alphanumeric or underscore -- PLUS, since v0.6.4, a numeric-shaped
-    needle is rejected when an intra-number separator glues it to an
-    adjacent digit (so ``12`` no longer matches inside ``18-12-107.5``).
-    See :func:`_occurrence_is_whole_token`. Alpha and mixed needles take
-    byte-identical decisions to the pre-v0.6.4 rule.
+    alphanumeric or underscore.
+
+    ``numeric_token_boundary`` (v0.6.5, default ``False`` = the historical
+    behavior) additionally rejects a NUMERIC-SHAPED needle when an
+    intra-number separator (``.`` ``-`` ``/``) glues it to an adjacent
+    digit, so ``12`` does not match inside ``18-12-107.5``. Alpha and
+    mixed-shape needles are unaffected either way -- ``Smith`` still
+    matches inside ``Smith-Jones``.
+
+    Pass ``True`` when the needle came from a detector (a numeric fragment
+    is then almost certainly coincidence); leave it ``False`` when a human
+    typed the needle (they may genuinely mean every occurrence). See the
+    rule commentary above :func:`_occurrence_is_whole_token`.
     """
     if not chars or not needle:
         return []
@@ -233,7 +252,7 @@ def search_whole_word_in_chars(needle: str, chars: list) -> list:
     needle_lower = needle.lower()
     text_lower = full_text.lower()
     needle_len = len(needle_lower)
-    numeric_needle = _is_numeric_shaped(needle)
+    numeric_needle = numeric_token_boundary and _is_numeric_shaped(needle)
 
     rects: list = []
     start = 0
