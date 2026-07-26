@@ -222,9 +222,21 @@ Match-dict shape:
   "page": int,
   "rect": {"x0": float, "y0": float, "x1": float, "y1": float},
   "type": str,
-  "enabled": bool
+  "enabled": bool,
+  "redact_label": str
 }
 ```
+
+`redact_label` on a match is **optional** (since 0.6.4) and labels that box
+alone, overriding the document-level `redact_label` above. Absent or empty
+falls back to the document-level value, so a payload carrying no per-match
+labels behaves exactly as it did before 0.6.4. Labelled and unlabelled
+matches burn in the same pass.
+
+Unknown match-dict keys are **ignored, not rejected** — this is deliberate
+and load-bearing. A newer closed app may be paired with an older frozen
+bundled CLI, so an unrecognized additive field must degrade (the older CLI
+stamps the document-level label) rather than fail the export.
 
 `output_protection` shape: `{"mode": "same"|"new"|"none", "password": str?}`.
 Modes `"same"` and `"new"` require a non-empty password; the caller is
@@ -479,3 +491,4 @@ shipping client has caught up.
 | 0.6.0 | 4 | Adds `reduce_size` op (+ `reduce_size_h`) for local PDF compression: lossless scrub + font subset, opt-in DPI image downsample, no-grow guard, cleartext-only. Additive — no protocol bump; v2–v4 unaffected. Doc gap: the 0.5.0–0.5.4 op additions (`set_metadata`, `insert_cover_page`, `blackout_pages`) predate this row and are not yet captured in the per-op contracts above. |
 | 0.6.1–0.6.2 | 4 | Patch fixes (redaction sliver + AcroForm widget-flatten guard-widen). No new ops. |
 | 0.6.3 | 4 | Adds `encrypt` op (+ `encrypt_h`) — AES-256 encrypt-on-exit, the symmetric counterpart to `decrypt`; and a `--version` CLI flag (bare semver on stdout). Additive — no protocol bump. The encrypted-save block is now shared with `apply_redactions` via `redact._save_encrypted`. The enum + `_h` table above are brought current as of this row (the earlier 0.5.x/0.6.0 op names were backfilled here). |
+| 0.6.4 | 4 | No new ops. (1) `apply_redactions` accepts an optional per-match `redact_label` overriding the document-level label for that box; absent/empty falls back, so a label-free payload is byte-identical to 0.6.3 (verified A/B against 0.6.3 across three document-label shapes, modulo the random trailer `/ID`). (2) **Behavior change** in `search_whole_word_in_chars`: for a numeric-shaped needle, an intra-number separator (`.`/`-`/`/`) that glues it to an adjacent digit is now token-INTERIOR, so `12` no longer matches inside `18-12-107.5`. Alpha and mixed needles are unaffected — `Smith` still matches inside `Smith-Jones`. Callers relying on the old looser numeric behavior must pin ≤0.6.3. Additive on the wire — no protocol bump. |

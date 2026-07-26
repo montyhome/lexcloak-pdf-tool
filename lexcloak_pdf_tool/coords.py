@@ -133,13 +133,88 @@ def search_in_chars(needle: str, chars: list) -> list:
     return rects
 
 
+# ── token-boundary rule (v0.6.4) ────────────────────────────────────────
+#
+# ``.``, ``-`` and ``/`` are word boundaries in prose ("end. Next", "opt-in",
+# "and/or") but INTRA-NUMBER SEPARATORS inside a number ("18-12-107.5",
+# "07/15/1973"). A single ``\w``-class rule for both reads a bare ``12`` as
+# whole-word-bounded inside ``18-12-107.5`` -- the hyphens ARE its boundaries
+# -- so a search for "12" placed a rect INSIDE a statute citation. Diagnosed
+# on a real Colorado court document; the consumer then amplified that 2-char
+# rect to the whole enclosing token, boxing text no detector ever matched.
+#
+# The corrected rule: for a NUMERIC-SHAPED needle, such a separator BINDS
+# when it glues the needle to an adjacent digit, making the needle a fragment
+# of a longer number rather than a token of its own.
+#
+# Scoped to numeric-shaped needles ON PURPOSE. Name-shaped text keeps the
+# looser rule: "Smith" must still match inside "Smith-Jones", because a
+# hyphenated surname is a real occurrence of the name. A digit fragment has
+# no such claim -- ``12`` inside ``18-12-107.5`` is coincidence, never the
+# datum.
+_NUMERIC_SEPARATORS = frozenset({".", "-", "/"})
+
+# Digits, optionally joined by intra-number separators: "12", "4", "107.5",
+# "18-12-107.5", "07/15/1973". Anchored, and a leading/trailing separator
+# does NOT qualify ("-12", "123-45-") -- those are not bare numbers.
+_NUMERIC_SHAPE_RE = re.compile(r"^\d+(?:[.\-/]\d+)*$")
+
+
+def _is_numeric_shaped(needle: str) -> bool:
+    """True when ``needle`` is a bare number, possibly with intra-number
+    separators -- the only shape the tightened boundary rule applies to."""
+    return _NUMERIC_SHAPE_RE.match(needle) is not None
+
+
+def _digit_bound_left(text: str, idx: int) -> bool:
+    """True when ``text[idx:]`` is glued to a preceding digit through an
+    intra-number separator -- i.e. ``idx`` opens mid-number, not at a token
+    start (the ``12`` of ``18-12-107.5``, whose left neighbour is ``-`` and
+    whose next-left is ``8``). A leading separator (``-12``) has no digit
+    behind it and does not bind."""
+    return (idx >= 2 and text[idx - 1] in _NUMERIC_SEPARATORS
+            and text[idx - 2].isdigit())
+
+
+def _digit_bound_right(text: str, end: int) -> bool:
+    """Mirror of :func:`_digit_bound_left` for the needle's right edge -- the
+    ``12`` of ``12-25-2024``. A trailing separator with no digit after it
+    ("Age: 12.") does not bind, so a sentence-final number still matches."""
+    return (end + 1 < len(text) and text[end] in _NUMERIC_SEPARATORS
+            and text[end + 1].isdigit())
+
+
+def _occurrence_is_whole_token(text: str, idx: int, end: int,
+                               numeric_needle: bool) -> bool:
+    """Whether the occurrence ``text[idx:end]`` stands as its own token.
+
+    The historical ``\\w``-class boundary (alnum or ``_`` on either side
+    rejects) is UNCHANGED -- it is what keeps "15" out of "2015" and "Smith"
+    out of "Smithy". One clause is layered on top for numeric-shaped needles
+    only: an intra-number separator that binds the needle to an adjacent
+    digit is a token-INTERIOR character, not a boundary.
+    """
+    if idx > 0 and (text[idx - 1].isalnum() or text[idx - 1] == "_"):
+        return False
+    if end < len(text) and (text[end].isalnum() or text[end] == "_"):
+        return False
+    if numeric_needle and (_digit_bound_left(text, idx)
+                           or _digit_bound_right(text, end)):
+        return False
+    return True
+
+
 def search_whole_word_in_chars(needle: str, chars: list) -> list:
-    """Whole-word search in character data -- filters out substring hits.
+    """Whole-token search in character data -- filters out substring hits.
 
     Equivalent to a word-boundary-respecting search using pre-extracted
     chars. Word-boundary semantics match the ``\\w`` regex class --
     rejects matches whose preceding or following character is
-    alphanumeric or underscore.
+    alphanumeric or underscore -- PLUS, since v0.6.4, a numeric-shaped
+    needle is rejected when an intra-number separator glues it to an
+    adjacent digit (so ``12`` no longer matches inside ``18-12-107.5``).
+    See :func:`_occurrence_is_whole_token`. Alpha and mixed needles take
+    byte-identical decisions to the pre-v0.6.4 rule.
     """
     if not chars or not needle:
         return []
@@ -158,6 +233,7 @@ def search_whole_word_in_chars(needle: str, chars: list) -> list:
     needle_lower = needle.lower()
     text_lower = full_text.lower()
     needle_len = len(needle_lower)
+    numeric_needle = _is_numeric_shaped(needle)
 
     rects: list = []
     start = 0
@@ -173,14 +249,8 @@ def search_whole_word_in_chars(needle: str, chars: list) -> list:
         # falsely rejects valid matches like "Susan" in "Name: Susan R."
         # because the surrounding string reads "...name:susanr..." with
         # no space between needle and next-word.
-        before_ok = idx == 0 or not (
-            text_lower[idx - 1].isalnum() or text_lower[idx - 1] == "_"
-        )
-        after_idx = idx + needle_len
-        after_ok = after_idx >= len(text_lower) or not (
-            text_lower[after_idx].isalnum() or text_lower[after_idx] == "_"
-        )
-        if not (before_ok and after_ok):
+        if not _occurrence_is_whole_token(text_lower, idx, idx + needle_len,
+                                          numeric_needle):
             start = idx + 1
             continue
 

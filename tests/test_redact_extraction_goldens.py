@@ -25,6 +25,8 @@ metrics), then padded ~2pt. No transform code is mirrored here.
 """
 from __future__ import annotations
 
+import re
+
 import fitz
 import pytest
 
@@ -243,6 +245,158 @@ def test_disabled_match_is_not_burned():
     assert SSN in _page_text(out)
     cx, cy = SSN_CENTER[(0, 0)]
     assert not _pixel_dark(out, 0, cx, cy)
+
+
+# ── per-match redact_label (v0.6.4) ─────────────────────────────────────
+#
+# The document-level label stamps every box; a per-match label overrides it
+# for one box, which is what lets a known-identity pseudonym ("Patient A")
+# land on one person's boxes while the rest of the document keeps the
+# default. Both burn in the SAME apply_redactions pass.
+#
+# Output bytes carry ONE source of run-to-run variation: the trailer /ID's
+# second element, a random file identifier PyMuPDF regenerates on every save
+# (measured: 28 of 1036 bytes on the fixture below, all inside that hex
+# string; the first /ID element and every content byte are stable). The
+# additive-only contract is therefore asserted against _canonical_pdf() --
+# byte-identity modulo that identifier, which is as literal as "byte
+# identical" can be made for a PDF writer.
+
+_TRAILER_ID_HEX_RE = re.compile(rb"(/ID\[.*)<[0-9A-Fa-f]+>(\]>>)", re.S)
+
+
+def _canonical_pdf(pdf_bytes: bytes) -> bytes:
+    """``pdf_bytes`` with the random trailer /ID hex neutralized."""
+    return _TRAILER_ID_HEX_RE.sub(rb"\1<FILEID>\2", pdf_bytes)
+
+
+def _labelled_match(rect: tuple, label, mid: str = "m1") -> dict:
+    m = _match(rect)
+    m["id"] = mid
+    if label is not None:
+        m["redact_label"] = label
+    return m
+
+
+def test_canonicalization_neutralizes_only_the_random_file_id():
+    """Guard for the helper the additive-only tests lean on: two saves of the
+    SAME payload differ in raw bytes (the /ID) but are canonically equal."""
+    pdf = _text_page_pdf(0, 0)
+    a, _ = apply_redactions(pdf, [_match(BURN_RECT[(0, 0)])],
+                            redact_label="REDACTED")
+    b, _ = apply_redactions(pdf, [_match(BURN_RECT[(0, 0)])],
+                            redact_label="REDACTED")
+    assert a != b, ("fixture assumption broken: output is now fully "
+                    "deterministic, so the canonicalization is masking "
+                    "nothing and these tests should compare raw bytes")
+    assert _canonical_pdf(a) == _canonical_pdf(b)
+
+
+def test_per_match_label_overrides_document_label_on_that_box_only():
+    """The headline: a mixed payload draws the per-match label on its own box
+    and the document label on the rest, in one burn pass."""
+    pdf = _text_page_pdf(0, 0)
+    matches = [
+        _labelled_match(BURN_RECT[(0, 0)], "Patient A", mid="m1"),
+        # Second box over the control row, no per-match label -> document one.
+        _labelled_match((38, 688, 200, 706), None, mid="m2"),
+    ]
+    out, _ = apply_redactions(pdf, matches, redact_label="REDACTED")
+    text = _page_text(out)
+    assert "Patient A" in text, "per-match label was not drawn"
+    assert "REDACTED" in text, "document label was not drawn on the unlabelled box"
+    assert SSN not in text, "the labelled box stopped scrubbing"
+    assert CONTROL not in text, "the unlabelled box stopped scrubbing"
+
+
+def test_absent_per_match_label_falls_back_to_document_label():
+    """A match with no ``redact_label`` key draws the document label."""
+    pdf = _text_page_pdf(0, 0)
+    out, _ = apply_redactions(pdf, [_match(BURN_RECT[(0, 0)])],
+                              redact_label="REDACTED")
+    assert "REDACTED" in _page_text(out)
+
+
+def test_empty_per_match_label_is_identical_to_omitting_the_key():
+    """``redact_label: ""`` means "no per-match label", NOT "suppress the
+    document label on this box" -- the same value already means "plain black
+    box" document-wide, so the inverted second meaning would be a trap."""
+    pdf = _text_page_pdf(0, 0)
+    absent, _ = apply_redactions(pdf, [_labelled_match(BURN_RECT[(0, 0)], None)],
+                                 redact_label="REDACTED")
+    empty, _ = apply_redactions(pdf, [_labelled_match(BURN_RECT[(0, 0)], "")],
+                                redact_label="REDACTED")
+    assert _canonical_pdf(absent) == _canonical_pdf(empty)
+    assert "REDACTED" in _page_text(empty)
+
+
+def test_per_match_label_on_disabled_match_draws_nothing():
+    """Unhappy path: a label does not resurrect a disabled match."""
+    pdf = _text_page_pdf(0, 0)
+    m = _labelled_match(BURN_RECT[(0, 0)], "Patient A")
+    m["enabled"] = False
+    out, _ = apply_redactions(pdf, [m], redact_label="REDACTED")
+    text = _page_text(out)
+    assert "Patient A" not in text
+    assert SSN in text, "disabled match was burned anyway"
+    cx, cy = SSN_CENTER[(0, 0)]
+    assert not _pixel_dark(out, 0, cx, cy)
+
+
+def test_no_per_match_labels_leaves_the_document_path_untouched():
+    """Additive-only: a payload carrying no per-match labels must produce the
+    same output the document-level path always produced. Pinned here against
+    a payload whose matches are stripped of the key entirely, so a future
+    edit that (say) always writes a resolved label into each annotation would
+    fail even though the visible label is unchanged."""
+    pdf = _text_page_pdf(0, 0)
+    plain = [{k: v for k, v in _match(BURN_RECT[(0, 0)]).items()}]
+    assert "redact_label" not in plain[0]
+    a, _ = apply_redactions(pdf, plain, redact_label="REDACTED")
+    b, _ = apply_redactions(pdf, [_match(BURN_RECT[(0, 0)])],
+                            redact_label="REDACTED")
+    assert _canonical_pdf(a) == _canonical_pdf(b)
+
+
+def test_per_match_label_with_no_document_label_labels_only_that_box():
+    """Document label empty + one per-match label: that box is labelled, the
+    other stays a plain black box."""
+    pdf = _text_page_pdf(0, 0)
+    matches = [
+        _labelled_match(BURN_RECT[(0, 0)], "Patient A", mid="m1"),
+        _labelled_match((38, 688, 200, 706), None, mid="m2"),
+    ]
+    out, _ = apply_redactions(pdf, matches, redact_label="")
+    text = _page_text(out)
+    assert "Patient A" in text
+    assert SSN not in text
+    assert CONTROL not in text
+
+
+def test_unicode_per_match_label_is_drawn():
+    """Boundary: a non-ASCII pseudonym must survive to the drawn text."""
+    pdf = _text_page_pdf(0, 0)
+    out, _ = apply_redactions(
+        pdf, [_labelled_match(BURN_RECT[(0, 0)], "Patiënt Ä")],
+        redact_label="REDACTED")
+    text = _page_text(out)
+    assert "Pati" in text and "nt" in text, (
+        f"unicode label absent from extraction: {text!r}")
+    assert SSN not in text
+
+
+def test_overlong_per_match_label_still_scrubs_the_value():
+    """Boundary: a label far wider than its box must not compromise the
+    scrub. PyMuPDF may clip or drop the overflowing text -- what is NOT
+    negotiable is that the underlying value is gone and the box is inked."""
+    pdf = _text_page_pdf(0, 0)
+    long_label = "Patient A " * 20
+    out, _ = apply_redactions(
+        pdf, [_labelled_match(BURN_RECT[(0, 0)], long_label)],
+        redact_label="REDACTED")
+    assert SSN not in _page_text(out)
+    cx, cy = SSN_CENTER[(0, 0)]
+    assert _pixel_dark(out, 0, cx, cy), "fill missing under an overlong label"
 
 
 # ── image pages: pixels destroyed in the embedded image ────────────────

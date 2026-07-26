@@ -418,6 +418,50 @@ def test_apply_redactions_inverted_rect_raises():
         apply_redactions(pdf, matches)
 
 
+def test_apply_redactions_non_string_per_match_label_raises():
+    """A non-string ``redact_label`` is caught at the wire boundary rather
+    than failing opaquely inside ``add_redact_annot``'s ``text=``."""
+    pdf = _make_pdf()
+    matches = [{
+        "id": "bad", "type": "SSN", "page": 0,
+        "rect": {"x0": 10, "y0": 10, "x1": 50, "y1": 30},
+        "enabled": True, "redact_label": 123,
+    }]
+    with pytest.raises(ValueError, match="redact_label"):
+        apply_redactions(pdf, matches)
+
+
+def test_apply_redactions_tolerates_unknown_per_match_keys():
+    """LOAD-BEARING CROSS-VERSION CONTRACT -- do not "tighten" this into
+    unknown-key rejection without a protocol bump.
+
+    The closed app pairs a v0.6.4-aware build with whatever bundled CLI was
+    frozen into it, which may be OLDER. Because this validator ignores keys
+    it does not know, a v0.6.3 CLI handed a per-match ``redact_label`` drops
+    it and stamps the document-level label -- a graceful degradation, not a
+    hard failure. Verified out-of-band against real v0.6.3 code at the time
+    this test was written. Adding strict key rejection here (as
+    ``cover_page`` and ``metadata`` do for THEIR payloads) would turn every
+    future additive per-match field into a breaking change for already-frozen
+    builds.
+    """
+    pdf = _make_pdf("Patient SSN 123-45-6789")
+    matches = [{
+        "id": "x", "type": "SSN", "page": 0,
+        "rect": {"x0": 30, "y0": 80, "x1": 300, "y1": 120},
+        "enabled": True, "text": "123-45-6789",
+        "some_future_field": {"nested": True},
+    }]
+    out, _ = apply_redactions(pdf, matches, redact_label="REDACTED")
+    out_doc = fitz.open(stream=out, filetype="pdf")
+    try:
+        text = out_doc[0].get_text()
+    finally:
+        out_doc.close()
+    assert "123-45-6789" not in text
+    assert "REDACTED" in text
+
+
 # ── apply_redactions: /Rotate geometry (Session 590) ───────────────────
 #
 # The app supplies match rects in as-rendered (rotation-applied) space, but
@@ -1179,6 +1223,92 @@ def test_whole_word_empty_inputs():
     chars = _ocr_line_chars("Susan called")
     assert search_whole_word_in_chars("", chars) == []
     assert search_whole_word_in_chars("Susan", []) == []
+
+
+# ── numeric token boundary (v0.6.4) ──────────────────────────────────
+#
+# `.`, `-` and `/` are word boundaries in prose but intra-number separators
+# inside a number. Before v0.6.4 one \w-class rule served both, so a bare
+# "12" matched INSIDE the statute citation "18-12-107.5" -- diagnosed on a
+# real Colorado court document, where the consumer then amplified that
+# 2-char rect to the whole enclosing token and boxed text no detector had
+# matched. These pin the corrected rule and, just as importantly, pin the
+# cases that must NOT change.
+
+
+def test_numeric_needle_rejected_inside_longer_number():
+    """The headline case: `12` is a fragment of `18-12-107.5`, not a token."""
+    chars = _ocr_line_chars("See 18-12-107.5 for details")
+    assert search_whole_word_in_chars("12", chars) == []
+
+
+def test_numeric_needle_rejected_inside_slash_bounded_number():
+    """Same rule for `/` -- `15` inside the date `07/15/1973`."""
+    chars = _ocr_line_chars("DOB 07/15/1973 on file")
+    assert search_whole_word_in_chars("15", chars) == []
+
+
+def test_numeric_needle_rejected_inside_dot_bounded_number():
+    """Same rule for `.` -- `5` inside the version-like `107.5.2`."""
+    chars = _ocr_line_chars("Section 107.5.2 applies")
+    assert search_whole_word_in_chars("5", chars) == []
+
+
+def test_numeric_needle_still_matches_as_its_own_token():
+    """Guard against over-tightening: a standalone number still matches."""
+    chars = _ocr_line_chars("Age 12 years")
+    assert len(search_whole_word_in_chars("12", chars)) == 1
+
+
+def test_numeric_needle_matches_before_sentence_final_period():
+    """A trailing separator with NO digit after it does not bind, so a
+    sentence-final number still matches ("Age: 12." -> `12` is a token)."""
+    chars = _ocr_line_chars("Patient age is 12. Next line")
+    assert len(search_whole_word_in_chars("12", chars)) == 1
+
+
+def test_numeric_needle_matches_after_leading_hyphen():
+    """A leading separator with no digit BEHIND it does not bind either --
+    `12` in `-12` is still its own token (the `-` reads as a minus sign or
+    a dash, not an intra-number separator)."""
+    chars = _ocr_line_chars("Delta -12 units")
+    assert len(search_whole_word_in_chars("12", chars)) == 1
+
+
+def test_full_numeric_needle_matches_the_whole_citation():
+    """Searching for the WHOLE number still places -- the rule rejects
+    fragments, not the number itself."""
+    chars = _ocr_line_chars("See 18-12-107.5 for details")
+    assert len(search_whole_word_in_chars("18-12-107.5", chars)) == 1
+
+
+def test_alpha_needle_still_matches_inside_hyphenated_name():
+    """UNCHANGED BY DESIGN, and the reason the rule is numeric-only: a
+    hyphenated surname is a real occurrence of the name, so `Smith` must
+    still match inside `Smith-Jones`. If this ever flips, the rule has
+    leaked out of its numeric scope."""
+    chars = _ocr_line_chars("Contact Smith-Jones today")
+    assert len(search_whole_word_in_chars("Smith", chars)) == 1
+
+
+def test_alpha_needle_still_matches_around_slash():
+    """Same guard for `/` on an alpha needle -- `and/or` splits into tokens."""
+    chars = _ocr_line_chars("terms and/or conditions")
+    assert len(search_whole_word_in_chars("and", chars)) == 1
+
+
+def test_mixed_alphanumeric_needle_keeps_the_looser_rule():
+    """A needle that is not bare-numeric (`A12`) is not numeric-shaped, so
+    the separator clause does not apply to it."""
+    chars = _ocr_line_chars("Case A12-99 filed")
+    assert len(search_whole_word_in_chars("A12", chars)) == 1
+
+
+def test_numeric_boundary_rejects_only_the_glued_occurrence():
+    """A needle appearing BOTH glued and standalone yields exactly the
+    standalone rect -- the rule filters per-occurrence, not per-needle."""
+    chars = _ocr_line_chars("Under 18-12-107.5 the age is 12 exactly")
+    assert len(search_whole_word_in_chars("12", chars)) == 1
 
 
 # ── pymupdf_version probe ────────────────────────────────────────────

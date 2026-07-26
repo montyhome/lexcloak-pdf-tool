@@ -31,6 +31,13 @@ def _validate_redaction_payload(matches: list[dict],
     Without this guard, a bad payload (e.g., ``{"page": "abc"}``,
     ``{"rect": {"x0": "??"}}``, swapped x0/x1) would surface as an opaque
     PyMuPDF error deep inside ``page.add_redact_annot``.
+
+    The optional per-match ``redact_label`` (v0.6.4) is type-checked here for
+    the same reason: a non-string label reaches ``add_redact_annot``'s
+    ``text=`` and fails inside PyMuPDF instead of at the wire boundary.
+    Unknown keys are NOT rejected -- this validator has always ignored them,
+    which is what lets a v0.6.4-aware app send per-match labels to an older
+    bundled CLI and get the document-level label rather than a hard failure.
     """
     for field_name, page_list in (("removed_pages", removed_pages),
                                   ("blackout_pages", blackout_pages)):
@@ -81,6 +88,13 @@ def _validate_redaction_payload(matches: list[dict],
         rect["y0"] = y0
         rect["x1"] = x1
         rect["y1"] = y1
+
+        label = m.get("redact_label")
+        if label is not None and not isinstance(label, str):
+            raise ValueError(
+                f"Malformed redaction payload: matches[{i}].redact_label "
+                f"is not a string (got {type(label).__name__})"
+            )
 
 
 def _strip_metadata_doc(doc) -> None:
@@ -309,6 +323,13 @@ def _apply_redactions_doc(doc, matches: list[dict],
     on per-match completeness, so a dropped page can never ship partially
     redacted. ``removed_pages`` wins any overlap: a deleted page needs no
     blackout, so a page listed in both is simply deleted.
+
+    ``redact_label`` is the document-level default; since v0.6.4 a match may
+    carry its own ``redact_label`` key that wins for that box alone. Both
+    labelled and unlabelled matches burn in the SAME ``apply_redactions``
+    pass -- the label is a per-annotation property, so per-match labels cost
+    nothing beyond the dict lookup (the rejected alternative was one burn
+    pass per distinct label, which would multiply the dominant export cost).
     """
     _validate_redaction_payload(matches, removed_pages, blackout_pages)
     # Flatten form fields BEFORE redacting: a widget /V survives a redaction
@@ -369,10 +390,20 @@ def _apply_redactions_doc(doc, matches: list[dict],
                 strips = [_derotate_to_native(s, page) for s in strips]
             for s in strips:
                 page.add_redact_annot(s, fill=(0, 0, 0))
-            if redact_label:
+            # Per-match label (v0.6.4) overrides the document-level one for
+            # THIS box only -- what lets one person's boxes carry a pseudonym
+            # ("Patient A") while the rest of the document keeps its default.
+            # Absent and empty-string both mean "no per-match label, use the
+            # document one": ``redact_label=""`` already means "plain black
+            # box" document-wide, so giving the same value a second, inverted
+            # meaning per-match ("suppress the document label here") would be
+            # a trap. A payload carrying no per-match labels therefore takes
+            # byte-identical decisions to v0.6.3.
+            label = m.get("redact_label") or redact_label
+            if label:
                 page.add_redact_annot(
                     rect,
-                    text=redact_label,
+                    text=label,
                     fontname="helv",
                     fontsize=font_size,
                     text_color=(1, 1, 1),
@@ -455,10 +486,16 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
         List of ``{"page": int, "rect": {"x0": ..., "y0": ..., "x1": ...,
         "y1": ...}, "enabled": bool, "type": str}``. Disabled matches and
         matches whose ``type`` is not in ``active_categories`` are skipped
-        (manual / custom regions are always included).
+        (manual / custom regions are always included). A match may also
+        carry an optional ``"redact_label": str`` (v0.6.4) labelling that
+        box alone -- see ``redact_label`` below.
     redact_label
         Optional text to overlay on each black box ("REDACTED",
-        "[b](6)", custom). Empty = plain black box.
+        "[b](6)", custom). Empty = plain black box. This is the
+        DOCUMENT-level default; since v0.6.4 an individual match may carry
+        its own ``redact_label`` key, which wins for that box only (absent
+        or empty falls back here). Mixing labelled and unlabelled matches
+        in one payload is supported and costs no extra burn pass.
     active_categories
         Optional set/list of category names. If provided, only matches
         whose ``type`` is in this set are redacted.
