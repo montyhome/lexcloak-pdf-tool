@@ -1225,46 +1225,49 @@ def test_whole_word_empty_inputs():
     assert search_whole_word_in_chars("Susan", []) == []
 
 
-# ── numeric token boundary (v0.6.4) ──────────────────────────────────
+# ── numeric token boundary (opt-in, v0.6.5) ──────────────────────────
 #
 # `.`, `-` and `/` are word boundaries in prose but intra-number separators
-# inside a number. Before v0.6.4 one \w-class rule served both, so a bare
-# "12" matched INSIDE the statute citation "18-12-107.5" -- diagnosed on a
-# real Colorado court document, where the consumer then amplified that
-# 2-char rect to the whole enclosing token and boxed text no detector had
-# matched. These pin the corrected rule and, just as importantly, pin the
-# cases that must NOT change.
+# inside a number, and one \w-class rule served both -- so a bare "12"
+# matched INSIDE the statute citation "18-12-107.5" (diagnosed on a real
+# Colorado court document, where the consumer then amplified that 2-char
+# rect to the whole enclosing token and boxed text no detector had matched).
+#
+# The rule is OPT-IN via numeric_token_boundary=True. The tests below pass
+# it explicitly; the DEFAULT-behavior tests in the next block pin that
+# callers who don't ask get exactly the pre-v0.6.4 semantics. Both halves
+# matter: the default is what user-typed needles rely on.
 
 
 def test_numeric_needle_rejected_inside_longer_number():
     """The headline case: `12` is a fragment of `18-12-107.5`, not a token."""
     chars = _ocr_line_chars("See 18-12-107.5 for details")
-    assert search_whole_word_in_chars("12", chars) == []
+    assert search_whole_word_in_chars("12", chars, numeric_token_boundary=True) == []
 
 
 def test_numeric_needle_rejected_inside_slash_bounded_number():
     """Same rule for `/` -- `15` inside the date `07/15/1973`."""
     chars = _ocr_line_chars("DOB 07/15/1973 on file")
-    assert search_whole_word_in_chars("15", chars) == []
+    assert search_whole_word_in_chars("15", chars, numeric_token_boundary=True) == []
 
 
 def test_numeric_needle_rejected_inside_dot_bounded_number():
     """Same rule for `.` -- `5` inside the version-like `107.5.2`."""
     chars = _ocr_line_chars("Section 107.5.2 applies")
-    assert search_whole_word_in_chars("5", chars) == []
+    assert search_whole_word_in_chars("5", chars, numeric_token_boundary=True) == []
 
 
 def test_numeric_needle_still_matches_as_its_own_token():
     """Guard against over-tightening: a standalone number still matches."""
     chars = _ocr_line_chars("Age 12 years")
-    assert len(search_whole_word_in_chars("12", chars)) == 1
+    assert len(search_whole_word_in_chars("12", chars, numeric_token_boundary=True)) == 1
 
 
 def test_numeric_needle_matches_before_sentence_final_period():
     """A trailing separator with NO digit after it does not bind, so a
     sentence-final number still matches ("Age: 12." -> `12` is a token)."""
     chars = _ocr_line_chars("Patient age is 12. Next line")
-    assert len(search_whole_word_in_chars("12", chars)) == 1
+    assert len(search_whole_word_in_chars("12", chars, numeric_token_boundary=True)) == 1
 
 
 def test_numeric_needle_matches_after_leading_hyphen():
@@ -1272,14 +1275,14 @@ def test_numeric_needle_matches_after_leading_hyphen():
     `12` in `-12` is still its own token (the `-` reads as a minus sign or
     a dash, not an intra-number separator)."""
     chars = _ocr_line_chars("Delta -12 units")
-    assert len(search_whole_word_in_chars("12", chars)) == 1
+    assert len(search_whole_word_in_chars("12", chars, numeric_token_boundary=True)) == 1
 
 
 def test_full_numeric_needle_matches_the_whole_citation():
     """Searching for the WHOLE number still places -- the rule rejects
     fragments, not the number itself."""
     chars = _ocr_line_chars("See 18-12-107.5 for details")
-    assert len(search_whole_word_in_chars("18-12-107.5", chars)) == 1
+    assert len(search_whole_word_in_chars("18-12-107.5", chars, numeric_token_boundary=True)) == 1
 
 
 def test_alpha_needle_still_matches_inside_hyphenated_name():
@@ -1288,27 +1291,83 @@ def test_alpha_needle_still_matches_inside_hyphenated_name():
     still match inside `Smith-Jones`. If this ever flips, the rule has
     leaked out of its numeric scope."""
     chars = _ocr_line_chars("Contact Smith-Jones today")
-    assert len(search_whole_word_in_chars("Smith", chars)) == 1
+    assert len(search_whole_word_in_chars("Smith", chars, numeric_token_boundary=True)) == 1
 
 
 def test_alpha_needle_still_matches_around_slash():
     """Same guard for `/` on an alpha needle -- `and/or` splits into tokens."""
     chars = _ocr_line_chars("terms and/or conditions")
-    assert len(search_whole_word_in_chars("and", chars)) == 1
+    assert len(search_whole_word_in_chars("and", chars, numeric_token_boundary=True)) == 1
 
 
 def test_mixed_alphanumeric_needle_keeps_the_looser_rule():
     """A needle that is not bare-numeric (`A12`) is not numeric-shaped, so
     the separator clause does not apply to it."""
     chars = _ocr_line_chars("Case A12-99 filed")
-    assert len(search_whole_word_in_chars("A12", chars)) == 1
+    assert len(search_whole_word_in_chars("A12", chars, numeric_token_boundary=True)) == 1
 
 
 def test_numeric_boundary_rejects_only_the_glued_occurrence():
     """A needle appearing BOTH glued and standalone yields exactly the
     standalone rect -- the rule filters per-occurrence, not per-needle."""
     chars = _ocr_line_chars("Under 18-12-107.5 the age is 12 exactly")
-    assert len(search_whole_word_in_chars("12", chars)) == 1
+    assert len(search_whole_word_in_chars("12", chars, numeric_token_boundary=True)) == 1
+
+
+# ── numeric boundary: the DEFAULT is the historical looser rule ───────
+#
+# LOAD-BEARING. Whether a numeric fragment is noise depends on where the
+# needle came from, and only the caller knows that. A detector-inferred
+# needle is worth tightening; a human-typed one is not -- someone who asks
+# to redact "12" may mean every 12, and in a redaction tool an unwanted box
+# costs one click while a missed one leaks. v0.6.4 briefly made the
+# tightened rule unconditional and silently changed both kinds of caller.
+# These tests are what stop that from happening again.
+
+
+@pytest.mark.parametrize("needle,text", [
+    ("12", "See 18-12-107.5 for details"),
+    ("15", "DOB 07/15/1973 on file"),
+    ("5", "Section 107.5.2 applies"),
+    ("4021", "Acct 12-4021-99 ref"),
+])
+def test_numeric_needle_still_matches_when_glued_by_default(needle, text):
+    """Without the flag, a glued numeric fragment STILL matches -- exactly
+    the pre-v0.6.4 behavior. A caller relying on this (user-typed search
+    terms) must keep getting it."""
+    chars = _ocr_line_chars(text)
+    assert len(search_whole_word_in_chars(needle, chars)) == 1
+
+
+def test_default_and_opt_in_agree_on_every_non_glued_case():
+    """The flag changes ONLY glued numeric fragments. Everything else --
+    alpha, mixed, standalone, whole-number, sentence-final -- must return
+    identical results with and without it."""
+    cases = [
+        ("12", "Age 12 years"),
+        ("12", "Patient age is 12. Next line"),
+        ("12", "Delta -12 units"),
+        ("18-12-107.5", "See 18-12-107.5 for details"),
+        ("Smith", "Contact Smith-Jones today"),
+        ("and", "terms and/or conditions"),
+        ("A12", "Case A12-99 filed"),
+    ]
+    for needle, text in cases:
+        chars = _ocr_line_chars(text)
+        loose = search_whole_word_in_chars(needle, chars)
+        tight = search_whole_word_in_chars(needle, chars,
+                                           numeric_token_boundary=True)
+        assert len(loose) == len(tight), (
+            f"{needle!r} in {text!r}: flag changed a case it must not "
+            f"({len(loose)} -> {len(tight)})")
+
+
+def test_numeric_token_boundary_is_keyword_only():
+    """Positional callers can't trip the flag by accident -- the third
+    positional arg was never a parameter, so this must raise."""
+    chars = _ocr_line_chars("See 18-12-107.5 for details")
+    with pytest.raises(TypeError):
+        search_whole_word_in_chars("12", chars, True)
 
 
 # ── pymupdf_version probe ────────────────────────────────────────────

@@ -254,20 +254,24 @@ def test_disabled_match_is_not_burned():
 # land on one person's boxes while the rest of the document keeps the
 # default. Both burn in the SAME apply_redactions pass.
 #
-# Output bytes carry ONE source of run-to-run variation: the trailer /ID's
-# second element, a random file identifier PyMuPDF regenerates on every save
-# (measured: 28 of 1036 bytes on the fixture below, all inside that hex
-# string; the first /ID element and every content byte are stable). The
-# additive-only contract is therefore asserted against _canonical_pdf() --
-# byte-identity modulo that identifier, which is as literal as "byte
-# identical" can be made for a PDF writer.
+# Output bytes carry ONE source of run-to-run variation: the trailer /ID,
+# a file identifier PyMuPDF regenerates on every save. Every content byte is
+# stable. The additive-only contract is therefore asserted against
+# _canonical_pdf() -- byte-identity modulo that identifier, which is as
+# literal as "byte identical" can be made for a PDF writer.
+#
+# The WHOLE array is neutralized, not just part of it, because its shape is
+# MuPDF-version-dependent: on 1.27 the first element is a literal string and
+# only the second (hex) element varies, while on 1.29 both elements are hex
+# and both vary. An earlier version of this helper neutralized only the
+# trailing hex element and passed locally on 1.27 while failing CI on 1.29.
 
-_TRAILER_ID_HEX_RE = re.compile(rb"(/ID\[.*)<[0-9A-Fa-f]+>(\]>>)", re.S)
+_TRAILER_ID_RE = re.compile(rb"/ID\s*\[.*?\]>>", re.S)
 
 
 def _canonical_pdf(pdf_bytes: bytes) -> bytes:
-    """``pdf_bytes`` with the random trailer /ID hex neutralized."""
-    return _TRAILER_ID_HEX_RE.sub(rb"\1<FILEID>\2", pdf_bytes)
+    """``pdf_bytes`` with the whole random trailer /ID array neutralized."""
+    return _TRAILER_ID_RE.sub(b"/ID[<FILEID>]>>", pdf_bytes)
 
 
 def _labelled_match(rect: tuple, label, mid: str = "m1") -> dict:
