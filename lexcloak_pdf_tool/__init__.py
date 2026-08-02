@@ -19,7 +19,9 @@ of the same name.
 * ``extract_text_dict``     -- PyMuPDF block/line/span hierarchy.
 * ``extract_text_plain``    -- plain text only.
 * ``search_for``            -- substring / whole-word / split search.
-* ``apply_redactions``      -- black-box redactions, optional re-encrypt.
+* ``apply_redactions``      -- black-box redactions, out-of-content residue
+                               scrub (annotations / attachments / document
+                               JavaScript / thumbnails), optional re-encrypt.
 * ``strip_metadata``        -- remove document metadata + XMP.
 * ``page_count``            -- number of pages.
 * ``page_size``             -- page dimensions in points.
@@ -33,7 +35,8 @@ of the same name.
                                (the encrypt-on-exit half of the decrypt/encrypt
                                pipeline bracket).
 * ``reduce_size``           -- local size reduction: scrub + font subset +
-                               optional DPI image downsample (opt-in, lossy).
+                               optional DPI image downsample (opt-in, lossy)
+                               + opt-in ``preserve_metadata`` carry-across.
 
 Plus ``pymupdf_version()`` (probe) and CharData serialization helpers in
 ``lexcloak_pdf_tool.coords``.
@@ -51,7 +54,7 @@ version = _fitz.version
 #: back to it when ``importlib.metadata`` has no dist-info to read (e.g. inside
 #: the frozen PyInstaller bundle). Keep it a plain string literal so
 #: setuptools can extract it statically without importing this module.
-__version__ = "0.6.5"
+__version__ = "0.6.6"
 
 
 def pymupdf_version() -> str:

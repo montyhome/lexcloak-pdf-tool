@@ -178,6 +178,193 @@ def test_quality_boundary_values_accepted(quality):
     _open_clean(out).close()
 
 
+# ── preserve_metadata: the Spec-13 stamp across the scrub (v0.6.6) ───
+#
+# The lossless scrub sets metadata=True, which wipes the whole dict --
+# including a marking the CALLER applied after redacting. Lex Cloak's
+# Spec-13 "Auto-redacted" notice lives in `subject` and was erased by every
+# successful compression before this flag existed (B3 M1, confirmed
+# empirically 2026-07-30 and re-confirmed against v0.6.5 on 2026-08-02).
+
+SPEC_13_SUBJECT = "Auto-redacted by Lex Cloak. Review before distribution."
+
+
+def _make_stamped_pdf(**meta) -> bytes:
+    """Text PDF carrying caller-applied metadata, sized so the no-grow guard
+    does not short-circuit the scrub (a returned original would preserve the
+    stamp trivially and prove nothing)."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    for i in range(40):
+        page.insert_text(fitz.Point(50, 80 + i * 16),
+                         "Reference 553-01-8842 filed 2026-03-04.", fontsize=11)
+    doc.set_metadata(meta)
+    out = doc.tobytes(garbage=0, deflate=False)
+    doc.close()
+    return out
+
+
+def _meta(pdf_bytes: bytes) -> dict:
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return {k: v for k, v in doc.metadata.items() if v}
+    finally:
+        doc.close()
+
+
+def test_default_still_strips_all_metadata():
+    """Historical behavior is the default -- preserve_metadata is opt-in."""
+    src = _make_stamped_pdf(subject=SPEC_13_SUBJECT, producer="SomeTool 9")
+    out, _ = reduce_size(src)
+    assert out != src                       # scrub actually ran
+    assert "subject" not in _meta(out)
+    assert "producer" not in _meta(out)
+
+
+def test_preserve_subject_keeps_the_spec_13_stamp():
+    src = _make_stamped_pdf(subject=SPEC_13_SUBJECT)
+    out, _ = reduce_size(src, preserve_metadata=("subject",))
+    assert out != src
+    assert _meta(out)["subject"] == SPEC_13_SUBJECT
+
+
+def test_preserve_subject_does_not_leak_other_metadata():
+    """Preserving one key must not resurrect the rest -- the narrow request
+    is honoured narrowly, so an unnamed key stays stripped even though it
+    IS a legal key to name."""
+    src = _make_stamped_pdf(
+        subject=SPEC_13_SUBJECT, producer="SomeTool 9",
+        creator="Scanner X", title="Case notes", author="A. Person",
+    )
+    out, _ = reduce_size(src, preserve_metadata=("subject",))
+    surviving = _meta(out)
+    assert surviving["subject"] == SPEC_13_SUBJECT
+    for gone in ("producer", "creator", "title", "author"):
+        assert gone not in surviving
+    assert b"Scanner X" not in out
+    assert b"Case notes" not in out
+
+
+def test_preserve_all_three_spec_13_fields():
+    """The Spec-13 marking is subject + producer + keywords, all three a
+    stated launch invariant -- the scrub wipes all three, so all three must
+    be recoverable in one call."""
+    src = _make_stamped_pdf(
+        subject=SPEC_13_SUBJECT, producer="Lex Cloak 1.8.19",
+        keywords="redacted, auto-redacted", creator="Scanner X",
+    )
+    out, _ = reduce_size(
+        src, preserve_metadata=("subject", "producer", "keywords"))
+    surviving = _meta(out)
+    assert surviving["subject"] == SPEC_13_SUBJECT
+    assert surviving["producer"] == "Lex Cloak 1.8.19"
+    assert surviving["keywords"] == "redacted, auto-redacted"
+    # The key NOT named is still stripped -- opting in one does not opt in all.
+    assert "creator" not in surviving
+
+
+def test_preserve_metadata_accepts_multiple_keys():
+    src = _make_stamped_pdf(subject=SPEC_13_SUBJECT, title="Exhibit B",
+                            producer="SomeTool 9")
+    out, _ = reduce_size(src, preserve_metadata=["subject", "title"])
+    surviving = _meta(out)
+    assert surviving["subject"] == SPEC_13_SUBJECT
+    assert surviving["title"] == "Exhibit B"
+    assert "producer" not in surviving
+
+
+def test_preserve_metadata_of_absent_key_is_not_an_error():
+    src = _make_stamped_pdf(subject=SPEC_13_SUBJECT)
+    out, _ = reduce_size(src, preserve_metadata=("title",))
+    assert _meta(out).get("title") is None
+    assert "subject" not in _meta(out)
+
+
+def test_preserve_metadata_survives_the_dpi_downsample_path():
+    """The stamp must outlive the lossy arm too, not just the lossless one."""
+    pm = fitz.Pixmap(fitz.csRGB, 1500, 1500, os.urandom(1500 * 1500 * 3), False)
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_image(fitz.Rect(50, 50, 250, 250), pixmap=pm)
+    doc.set_metadata({"subject": SPEC_13_SUBJECT, "producer": "SomeTool 9"})
+    src = doc.tobytes(garbage=4, deflate=True)
+    doc.close()
+
+    out, info = reduce_size(src, dpi=72, quality=40,
+                            preserve_metadata=("subject",))
+    assert info["applied_dpi"] == 72          # the lossy arm really ran
+    assert _meta(out)["subject"] == SPEC_13_SUBJECT
+    assert "producer" not in _meta(out)
+
+
+@pytest.mark.parametrize("key", ["producer", "creator", "creationDate",
+                                 "modDate", "title", "author", "keywords"])
+def test_every_writable_metadata_key_is_nameable(key):
+    """The check is known-key, not a safety allowlist: whether a key is safe
+    to keep is the caller's call, so every writable key must be nameable."""
+    src = _make_stamped_pdf(subject=SPEC_13_SUBJECT, **{key: "sentinel-value"})
+    out, _ = reduce_size(src, preserve_metadata=(key,))
+    assert _meta(out).get(key) == "sentinel-value"
+
+
+@pytest.mark.parametrize("bad", [("nope",), ("Subject",), ("subj",), ("",),
+                                 ("format",), ("encryption",)])
+def test_preserve_metadata_refuses_unknown_keys(bad):
+    """Typo rejection is the point: a misspelled key is otherwise a silent
+    no-op, and a silently-dropped marking is the failure this prevents.
+    `format`/`encryption` are derived, not settable, so they are unknown."""
+    with pytest.raises(ValueError, match="unknown metadata key"):
+        reduce_size(_make_stamped_pdf(subject=SPEC_13_SUBJECT),
+                    preserve_metadata=bad)
+
+
+@pytest.mark.parametrize("bad", ["subject", 42, {"subject": 1}, object()])
+def test_preserve_metadata_refuses_non_sequence(bad):
+    """A bare str must be rejected, not silently iterated into characters."""
+    with pytest.raises(ValueError, match="list or tuple"):
+        reduce_size(_make_stamped_pdf(subject=SPEC_13_SUBJECT),
+                    preserve_metadata=bad)
+
+
+def test_preserve_metadata_empty_tuple_is_historical_behavior():
+    src = _make_stamped_pdf(subject=SPEC_13_SUBJECT)
+    out, _ = reduce_size(src, preserve_metadata=())
+    assert "subject" not in _meta(out)
+
+
+# ── Thumbnails: scrub(thumbnails=True) is a no-op on this flag-set ───
+
+
+def test_thumbnails_are_actually_stripped():
+    """The module docstring has always claimed this op scrubs thumbnails.
+    It did not: scrub's page loop early-continues on
+    ``not (clean_pages or hidden_text)`` before its thumbnail branch, and
+    this op passes both False deliberately. Measured against pymupdf 1.27.2
+    on 2026-08-02; ``null_page_thumbnails`` closes it."""
+    doc = fitz.open(stream=_make_stamped_pdf(), filetype="pdf")
+    page = doc[0]
+    pix = page.get_pixmap(dpi=12)
+    tx = doc.get_new_xref()
+    doc.update_object(tx, "<<>>")
+    doc.update_stream(tx, pix.tobytes("png"))
+    doc.xref_set_key(page.xref, "Thumb", "%d 0 R" % tx)
+    src = doc.tobytes(garbage=0, deflate=True)
+    doc.close()
+
+    pre = fitz.open(stream=src, filetype="pdf")
+    try:
+        assert pre.xref_get_key(pre[0].xref, "Thumb") != ("null", "null")
+    finally:
+        pre.close()
+
+    out, _ = reduce_size(src)
+    post = fitz.open(stream=out, filetype="pdf")
+    try:
+        assert post.xref_get_key(post[0].xref, "Thumb") == ("null", "null")
+    finally:
+        post.close()
+
+
 # ── Sad paths ────────────────────────────────────────────────────────
 
 

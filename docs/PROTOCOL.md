@@ -354,6 +354,7 @@ scrub + font subsetting); opt-in image downsample when `dpi` is given.
 | `dpi` | int or null | `null` (lossless — no image downsample) |
 | `quality` | int 1..100 | `75` (JPEG quality when downsampling) |
 | `grayscale` | bool | `false` (convert downsampled images to gray) |
+| `preserve_metadata` | array of string or null | `null` (v0.6.6 — strip everything, historical behaviour) |
 
 **Result:** `{"pdf_b64": str, "info": {"orig_size": int, "new_size": int, "applied_dpi": int|null}}`.
 
@@ -364,6 +365,36 @@ returns bytes larger than the input (no-grow guard) and preserves the
 OCR/selectable text layer. Encrypted/password-protected input returns
 `error_type: "ValueError"` — the op requires cleartext (the redaction
 route compresses before any optional encryption).
+
+`preserve_metadata` (v0.6.6) names metadata keys to carry across the
+scrub. The lossless scrub strips the whole metadata dict, including any
+marking the **caller** applied after redacting — Lex Cloak's Spec-13
+notice spans `subject` + `producer` + `keywords` and all three were
+erased by every successful compression before this field existed. Send
+`["subject", "producer", "keywords"]` to keep them.
+
+Known keys are `title`, `author`, `subject`, `keywords`, `creator`,
+`producer`, `creationDate`, `modDate`. Anything else — including a
+misspelling like `"Subject"`, and the derived-not-settable `format` /
+`encryption` — returns `error_type: "ValueError"`. A bare string instead
+of an array is likewise rejected rather than iterated into characters.
+
+That validation is a **known-key check, not a safety allowlist**.
+Whether a key is safe to keep is the caller's decision and this op cannot
+make it: `producer` holding `"Lex Cloak 1.8.19"` is a deliberate
+post-redaction marking, `producer` holding `"HP Scanner 4.2"` is a
+fingerprint leak — same key, same type, opposite meanings. What the check
+buys is typo rejection, since a misspelled key would otherwise be a
+silent no-op and a silently-dropped marking is the failure this field
+exists to prevent. Name the narrowest set that carries your marking.
+
+The field is opt-in rather than default-on because this is a general op:
+flipping the default would start preserving arbitrary third-party
+document metadata that callers rely on it to strip.
+
+An older subprocess that predates v0.6.6 ignores the field (unknown keys
+have always been ignored on this wire) and strips the metadata as before
+— the caller sees a missing stamp, not a protocol error.
 
 ### `exit`
 

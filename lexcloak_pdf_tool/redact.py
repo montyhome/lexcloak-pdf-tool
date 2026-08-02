@@ -191,7 +191,125 @@ def _flatten_form_fields(doc) -> None:
     if not (doc.is_form_pdf or _has_any_widget(doc)):
         return
     # bake(annots=False, widgets=True): flatten only interactive form widgets.
+    # Non-widget annotations are handled by _scrub_residue (deleted, not baked).
     doc.bake(annots=False, widgets=True)
+
+
+# Annotation types the residue scrub KEEPS. Links carry no free text of their
+# own -- a /Link is a rect plus a destination -- and non-overlapping links are
+# a deliberate out-of-scope decision for the residue work (they are a distinct
+# vector wanting their own ruling, not a text leak). Everything else goes.
+#
+# Belt-and-braces, not the primary mechanism: ``page.annots()`` does not yield
+# Link annotations at all (pymupdf 1.27.2 -- they are reachable only through
+# ``annot_xrefs`` / ``get_links``), so the walk below never sees a link even
+# before this set is consulted. The explicit entry is what keeps links
+# surviving if that upstream behaviour ever changes.
+_KEEP_ANNOT_TYPES = frozenset({_fitz.PDF_ANNOT_LINK})
+
+
+def null_page_thumbnails(doc) -> int:
+    """Drop every page's ``/Thumb``; return how many were dropped.
+
+    **``scrub(thumbnails=True)`` cannot be relied on.** PyMuPDF's page loop
+    early-``continue``s on ``if not (clean_pages or hidden_text)`` *before*
+    reaching its thumbnail branch (pymupdf 1.27.2, ``Document.scrub``), so
+    the flag is silently a no-op on exactly the flag-set a redaction tool
+    must use -- ``clean_pages=False`` (never re-run content machinery over
+    finalized bytes) and ``hidden_text=False`` (keep the invisible OCR
+    layer). Measured 2026-08-02: a ``/Thumb`` raster survived a full burn
+    with ``thumbnails=True`` set, recoverable as 820 bytes of PNG.
+
+    That matters because a thumbnail is a cached raster of the page as it
+    looked *before* the redaction -- a picture of the content just burned
+    away. Nulling the key orphans the stream, which the callers' saves
+    (``garbage=4``) then collect.
+    """
+    dropped = 0
+    for page in doc:
+        if doc.xref_get_key(page.xref, "Thumb")[0] != "null":
+            doc.xref_set_key(page.xref, "Thumb", "null")
+            dropped += 1
+    return dropped
+
+
+def _scrub_residue(doc) -> None:
+    """Strip non-page-content residue that survives ``apply_redactions``.
+
+    ``apply_redactions`` only rewrites *page content streams*. Four classes of
+    payload live outside them, are never seen by detection, and shipped intact
+    in every export before v0.6.6:
+
+    * **Annotation text** -- sticky notes (``/Text``), ``/FreeText``,
+      comments. Two distinct shapes, both verified surviving a default burn
+      against v0.6.5: a ``/Text`` note's content is NOT returned by
+      ``page.get_text()``, so no detector can match it and no user can
+      redact it; a ``/FreeText``'s text IS returned, so a match is produced
+      and a box drawn -- but the box burns the page CONTENT stream while the
+      text lives in the annot's own appearance stream, so it survives while
+      the user is told it was redacted.
+    * **Embedded / attached files** -- a whole second document riding along.
+      Verified: the payload came back byte-for-byte from ``embfile_get`` on a
+      v0.6.5 export.
+    * **Document-level JavaScript** -- executable content in a "safe to share"
+      artifact.
+    * **Page thumbnails** -- a cached raster of the page as it looked
+      *before* the burn, i.e. a picture of the unredacted content.
+
+    **Delete, do not bake.** ``doc.bake(annots=True)`` would paint annotation
+    appearance streams into the page content -- converting text that detection
+    never saw into permanent, extractable page content that nothing redacted.
+    That is strictly worse than the status quo: it would launder undetected
+    residue into the very layer the tool promises is clean. Deletion is the
+    only direction that shrinks the leak.
+
+    Ordering: callers must run this AFTER ``apply_redactions`` (which consumes
+    the redaction annots it created) and after any blackout/removal passes, so
+    the scrub sees the final annot set. It runs before ``_strip_metadata_doc``,
+    which owns metadata and XMP -- hence ``metadata``/``xml_metadata`` are
+    False here rather than duplicated.
+
+    ``hidden_text=False`` is load-bearing and mirrors ``reduce_size``: a
+    scanned redacted PDF carries its searchable layer as invisible
+    (render-mode-3) text over the page image, and ``scrub``'s default would
+    delete it -- destroying text selection on exactly the documents this tool
+    targets. ``clean_pages``/``redactions`` stay off for the same reason
+    ``reduce_size`` keeps them off: this op must never re-run redaction
+    machinery over finalized bytes.
+    """
+    for page in doc:
+        # Snapshot first: deleting while iterating page.annots() invalidates
+        # the generator mid-walk and silently skips entries.
+        doomed = [a for a in page.annots() if a.type[0] not in _KEEP_ANNOT_TYPES]
+        for annot in doomed:
+            page.delete_annot(annot)
+
+    doc.scrub(
+        attached_files=True,
+        embedded_files=True,
+        javascript=True,
+        # Set for intent, but NOT trusted -- see null_page_thumbnails below.
+        thumbnails=True,
+        # Owned by _strip_metadata_doc, which runs immediately after.
+        metadata=False,
+        xml_metadata=False,
+        # See docstring -- each of these would damage a redacted artifact.
+        hidden_text=False,
+        clean_pages=False,
+        redactions=False,
+        remove_links=False,
+        reset_fields=False,
+        reset_responses=False,
+    )
+
+    # scrub's own thumbnail branch is unreachable on this flag-set.
+    null_page_thumbnails(doc)
+
+    # scrub(javascript=True) empties the action body to `/JS ()` but leaves
+    # the /Names/JavaScript name tree in place -- and its NAMES are author
+    # chosen, so a script named for a matter or custodian would ride out in
+    # a document that is supposed to carry nothing along. Drop the tree.
+    doc.xref_set_key(doc.pdf_catalog(), "Names/JavaScript", "null")
 
 
 # A rect within this many points of a page edge is treated as flush against
@@ -311,9 +429,10 @@ def _apply_redactions_doc(doc, matches: list[dict],
 
     Mutates ``doc`` in place: AcroForm widgets are flattened to static content,
     redaction annotations are applied, ``blackout_pages`` are fully blacked out,
-    ``removed_pages`` are deleted, metadata is stripped. Caller owns ``doc``
-    lifecycle -- this helper does NOT close it. Used by both the bytes-IPC entry
-    point and the v0.4.0 stateful handle protocol.
+    ``removed_pages`` are deleted, out-of-content residue is scrubbed (see
+    ``_scrub_residue``), metadata is stripped. Caller owns ``doc`` lifecycle --
+    this helper does NOT close it. Used by both the bytes-IPC entry point and
+    the v0.4.0 stateful handle protocol.
 
     ``removed_pages`` vs ``blackout_pages`` are the two "drop" outcomes a page
     can have (Session 592 triage redesign): a removed page is deleted from the
@@ -446,6 +565,12 @@ def _apply_redactions_doc(doc, matches: list[dict],
             raise ValueError("Cannot export: all pages have been removed")
         for pg_num in sorted(valid_removed, reverse=True):
             doc.delete_page(pg_num)
+
+    # Strip residue that lives OUTSIDE page content streams (annotation text,
+    # attachments, document JavaScript, pre-burn page thumbnails) -- none of it
+    # is touched by apply_redactions. Runs after every content pass so it sees
+    # the final annot set, and before _strip_metadata_doc, which owns metadata.
+    _scrub_residue(doc)
 
     _strip_metadata_doc(doc)
 
