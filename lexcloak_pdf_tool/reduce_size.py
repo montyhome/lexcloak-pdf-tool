@@ -42,7 +42,7 @@ from __future__ import annotations
 import io
 import logging
 
-from .redact import open_pdf
+from .redact import null_page_thumbnails, open_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,40 @@ def _validate_reduce_params(dpi, quality) -> None:
         raise ValueError(f"quality must be in 1..100, got {quality}")
 
 
+# Metadata keys ``preserve_metadata`` will restore. Restricted to the
+# descriptive, caller-authored fields -- never ``producer``/``creator``
+# (tool fingerprints) or the date fields (timeline leakage), which the
+# scrub exists to remove.
+_PRESERVABLE_METADATA_KEYS = frozenset({"subject", "title", "author", "keywords"})
+
+
+def _validate_preserve_metadata(preserve_metadata) -> frozenset[str]:
+    """Normalize + validate ``preserve_metadata`` into a set of keys.
+
+    ``None`` (the default) yields the empty set -- historical behavior, no
+    metadata survives the scrub. Anything else must be a list/tuple of keys
+    drawn from :data:`_PRESERVABLE_METADATA_KEYS`; a str is rejected outright
+    rather than silently iterated into characters.
+    """
+    if preserve_metadata is None:
+        return frozenset()
+    if isinstance(preserve_metadata, str) or not isinstance(
+        preserve_metadata, (list, tuple)
+    ):
+        raise ValueError(
+            "preserve_metadata must be a list or tuple of keys, got "
+            f"{type(preserve_metadata).__name__}"
+        )
+    keys = frozenset(preserve_metadata)
+    unknown = keys - _PRESERVABLE_METADATA_KEYS
+    if unknown:
+        raise ValueError(
+            "preserve_metadata contains non-preservable key(s): "
+            f"{sorted(unknown)}; allowed: {sorted(_PRESERVABLE_METADATA_KEYS)}"
+        )
+    return keys
+
+
 # Lossless scrub flag-set: strip metadata / XMP / thumbnails / attachments /
 # JavaScript / orphan objects, but change NOTHING the eye or a text extractor
 # can observe. Two overrides are load-bearing for Lex Cloak:
@@ -83,6 +117,13 @@ def _validate_reduce_params(dpi, quality) -> None:
 #     unless clean_pages=True; we deliberately want none of the three.)
 # remove_links / reset_fields / reset_responses stay off so the op is
 # strictly size-affecting, not content-affecting.
+#
+# ``thumbnails=True`` is passed for intent but does NOT work on this
+# flag-set: scrub's page loop early-``continue``s on
+# ``not (clean_pages or hidden_text)`` before reaching its thumbnail branch,
+# so this op silently never stripped thumbnails despite the module docstring
+# saying it did (measured 2026-08-02, v0.6.6). ``null_page_thumbnails``
+# below does it for real.
 def _scrub_lossless(doc) -> None:
     doc.scrub(
         attached_files=True,
@@ -98,10 +139,18 @@ def _scrub_lossless(doc) -> None:
         reset_fields=False,
         reset_responses=False,
     )
+    null_page_thumbnails(doc)
 
 
-def _apply_reductions(doc, *, dpi=None, quality=75, grayscale=False) -> int | None:
+def _apply_reductions(doc, *, dpi=None, quality=75, grayscale=False,
+                      preserve_metadata=None) -> int | None:
     """Mutate ``doc`` in place; return the DPI actually applied (or ``None``).
+
+    ``preserve_metadata`` lives HERE rather than in :func:`reduce_size` on
+    purpose: the v4 stateful-handle op (``reduce_size_h``) bypasses
+    ``reduce_size`` entirely and calls this helper directly, so preserving
+    the stamp one level up would silently not apply on that path. Anything
+    that scrubs goes through this function.
 
     Runs the lossless steps (scrub + ``subset_fonts``) always, then -- when
     ``dpi`` is given -- an image downsample. The two enhancement steps
@@ -115,7 +164,16 @@ def _apply_reductions(doc, *, dpi=None, quality=75, grayscale=False) -> int | No
     is "cap every image at ``dpi``" while leaving images already at or below
     the target untouched.
     """
+    keep_keys = _validate_preserve_metadata(preserve_metadata)
+    # Snapshot BEFORE the scrub -- _scrub_lossless wipes the whole dict.
+    preserved = {
+        k: v for k, v in (doc.metadata or {}).items() if k in keep_keys and v
+    } if keep_keys else {}
+
     _scrub_lossless(doc)
+
+    if preserved:
+        doc.set_metadata(preserved)
     try:
         doc.subset_fonts()
     except Exception as exc:  # noqa: BLE001 -- best-effort enhancement
@@ -140,6 +198,7 @@ def _apply_reductions(doc, *, dpi=None, quality=75, grayscale=False) -> int | No
 def reduce_size(
     pdf_bytes: bytes, *, dpi: int | None = None, quality: int = 75,
     grayscale: bool = False,
+    preserve_metadata: tuple[str, ...] | list[str] | None = None,
 ) -> tuple[bytes, dict]:
     """Compress ``pdf_bytes`` locally; return ``(out_bytes, info)``.
 
@@ -148,16 +207,39 @@ def reduce_size(
     bytes: ``None`` for the lossless path, for a downsample that failed and
     fell back to lossless, or when the no-grow guard returned the original.
 
-    Raises ``ValueError`` on a bad ``dpi``/``quality`` or on encrypted
+    ``preserve_metadata`` (v0.6.6, keyword-only, default ``None`` = historical
+    behavior) names metadata keys to carry across the scrub. The lossless
+    scrub sets ``metadata=True``, which wipes the whole dict -- including any
+    marking the CALLER applied after redacting. Lex Cloak's Spec-13
+    "Auto-redacted" notice lives in ``subject`` and was silently erased by
+    every successful compression before this flag existed; the caller now
+    passes ``preserve_metadata=("subject",)`` to keep it.
+
+    Opt-in rather than default-on because ``reduce_size`` is a general op:
+    flipping the default would start preserving arbitrary third-party
+    document metadata that callers currently rely on this op to strip. Same
+    shape as v0.6.5's ``numeric_token_boundary`` -- and for the same reason
+    v0.6.4 was superseded, which applied its change unconditionally.
+
+    Only :data:`_PRESERVABLE_METADATA_KEYS` may be named; ``producer``,
+    ``creator`` and the date fields are refused because preserving them would
+    re-introduce exactly the fingerprint/timeline leakage the scrub removes.
+
+    Raises ``ValueError`` on a bad ``dpi``/``quality``, an unknown or
+    non-preservable ``preserve_metadata`` key, or on encrypted
     (password-protected) input.
     """
     _validate_reduce_params(dpi, quality)
+    # Validate early so a bad key fails before any document work; the
+    # authoritative snapshot/restore lives in _apply_reductions.
+    _validate_preserve_metadata(preserve_metadata)
     doc = open_pdf(pdf_bytes)
     try:
         if doc.is_encrypted and doc.needs_pass:
             raise ValueError("reduce_size() input must be cleartext")
         applied_dpi = _apply_reductions(
-            doc, dpi=dpi, quality=quality, grayscale=grayscale
+            doc, dpi=dpi, quality=quality, grayscale=grayscale,
+            preserve_metadata=preserve_metadata,
         )
         buf = io.BytesIO()
         doc.save(buf, garbage=4, deflate=True, clean=True)

@@ -414,8 +414,14 @@ def _op_reduce_size(cmd: dict) -> dict:
     dpi = cmd.get("dpi")
     quality = cmd.get("quality", 75)
     grayscale = bool(cmd.get("grayscale", False))
+    # v0.6.6: opt-in metadata carry-across (the caller's post-redaction
+    # marking, e.g. the Spec-13 notice, otherwise dies in the scrub).
+    # Absent key -> None -> historical behavior; a JSON array arrives as a
+    # list, which _validate_preserve_metadata accepts.
+    preserve_metadata = cmd.get("preserve_metadata")
     out_bytes, info = reduce_size(
-        pdf_bytes, dpi=dpi, quality=quality, grayscale=grayscale
+        pdf_bytes, dpi=dpi, quality=quality, grayscale=grayscale,
+        preserve_metadata=preserve_metadata,
     )
     return {
         "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
@@ -698,12 +704,14 @@ def _op_reduce_size_h(cmd: dict) -> dict:
     dpi = cmd.get("dpi")
     quality = cmd.get("quality", 75)
     grayscale = bool(cmd.get("grayscale", False))
+    preserve_metadata = cmd.get("preserve_metadata")
     _validate_reduce_params(dpi, quality)
     if doc.is_encrypted and doc.needs_pass:
         raise ValueError("reduce_size() input must be cleartext")
     orig_bytes = _save_doc_bytes(doc)
     applied_dpi = _apply_reductions(
-        doc, dpi=dpi, quality=quality, grayscale=grayscale
+        doc, dpi=dpi, quality=quality, grayscale=grayscale,
+        preserve_metadata=preserve_metadata,
     )
     new_bytes = _save_doc_bytes(doc)
     if len(new_bytes) >= len(orig_bytes):

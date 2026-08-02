@@ -1379,3 +1379,105 @@ def test_handle_protocol_uses_smaller_payload_than_stateless():
     # Handle payload should be a small constant; stateless grows with PDF size.
     assert len(handle_payload) < 200
     assert len(stateless_payload) > 5 * len(handle_payload)
+
+
+# ── reduce_size preserve_metadata across the wire (v0.6.6) ─────────
+#
+# The scrub inside reduce_size wipes all metadata, including a marking the
+# CALLER applied after redacting (Lex Cloak's Spec-13 "Auto-redacted"
+# notice lives in `subject`). `preserve_metadata` carries named keys across
+# it. Both wire ops must honour it: the stateless `reduce_size` AND the v4
+# `reduce_size_h`, which bypasses the reduce_size() wrapper entirely and
+# calls _apply_reductions directly.
+
+_SPEC_13 = "Auto-redacted by Lex Cloak. Review before distribution."
+
+
+def _make_stamped_pdf(**meta) -> bytes:
+    """Text PDF with caller-applied metadata, big enough that the no-grow
+    guard cannot short-circuit the scrub and preserve the stamp trivially."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    for i in range(40):
+        page.insert_text(fitz.Point(50, 80 + i * 16),
+                         "Reference 553-01-8842 filed 2026-03-04.", fontsize=11)
+    doc.set_metadata(meta)
+    out = doc.tobytes(garbage=0, deflate=False)
+    doc.close()
+    return out
+
+
+def _subject_of(pdf_b64: str) -> str:
+    doc = fitz.open(stream=base64.b64decode(pdf_b64), filetype="pdf")
+    try:
+        return doc.metadata.get("subject") or ""
+    finally:
+        doc.close()
+
+
+def test_reduce_size_wire_default_still_strips_subject():
+    src = _make_stamped_pdf(subject=_SPEC_13, producer="SomeTool 9")
+    with CLISession() as s:
+        resp = s.call("reduce_size", pdf_b64=_b64(src))
+    assert resp["ok"] is True, resp
+    assert _subject_of(resp["result"]["pdf_b64"]) == ""
+
+
+def test_reduce_size_wire_preserves_named_subject():
+    src = _make_stamped_pdf(subject=_SPEC_13, producer="SomeTool 9")
+    with CLISession() as s:
+        resp = s.call("reduce_size", pdf_b64=_b64(src),
+                      preserve_metadata=["subject"])
+    assert resp["ok"] is True, resp
+    out_b64 = resp["result"]["pdf_b64"]
+    assert _subject_of(out_b64) == _SPEC_13
+    # ...and the fingerprint key did NOT come back with it.
+    assert b"SomeTool 9" not in base64.b64decode(out_b64)
+
+
+def test_reduce_size_h_wire_preserves_named_subject():
+    """reduce_size_h bypasses reduce_size() and calls _apply_reductions
+    directly -- the preservation must live deep enough to cover it."""
+    src = _make_stamped_pdf(subject=_SPEC_13)
+    with CLISession() as s:
+        handle = _open(s, src)
+        resp = s.call("reduce_size_h", handle=handle,
+                      preserve_metadata=["subject"])
+    assert resp["ok"] is True, resp
+    assert _subject_of(resp["result"]["pdf_b64"]) == _SPEC_13
+
+
+def test_reduce_size_h_wire_default_still_strips_subject():
+    src = _make_stamped_pdf(subject=_SPEC_13)
+    with CLISession() as s:
+        handle = _open(s, src)
+        resp = s.call("reduce_size_h", handle=handle)
+    assert resp["ok"] is True, resp
+    assert _subject_of(resp["result"]["pdf_b64"]) == ""
+
+
+@pytest.mark.parametrize("op", ["reduce_size", "reduce_size_h"])
+def test_reduce_size_wire_rejects_non_preservable_key(op):
+    """A fingerprint key must be refused on BOTH ops, as a clean protocol
+    error rather than a silently-ignored request."""
+    src = _make_stamped_pdf(subject=_SPEC_13, producer="SomeTool 9")
+    with CLISession() as s:
+        if op.endswith("_h"):
+            resp = s.call(op, handle=_open(s, src),
+                          preserve_metadata=["producer"])
+        else:
+            resp = s.call(op, pdf_b64=_b64(src),
+                          preserve_metadata=["producer"])
+    assert resp["ok"] is False, resp
+    assert "non-preservable" in json.dumps(resp)
+
+
+def test_reduce_size_wire_rejects_bare_string_preserve_metadata():
+    """JSON gives us a str if the caller forgets the array -- it must be
+    rejected, not iterated into single characters."""
+    src = _make_stamped_pdf(subject=_SPEC_13)
+    with CLISession() as s:
+        resp = s.call("reduce_size", pdf_b64=_b64(src),
+                      preserve_metadata="subject")
+    assert resp["ok"] is False, resp
+    assert "list or tuple" in json.dumps(resp)
