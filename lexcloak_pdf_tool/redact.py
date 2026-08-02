@@ -199,6 +199,12 @@ def _flatten_form_fields(doc) -> None:
 # own -- a /Link is a rect plus a destination -- and non-overlapping links are
 # a deliberate out-of-scope decision for the residue work (they are a distinct
 # vector wanting their own ruling, not a text leak). Everything else goes.
+#
+# Belt-and-braces, not the primary mechanism: ``page.annots()`` does not yield
+# Link annotations at all (pymupdf 1.27.2 -- they are reachable only through
+# ``annot_xrefs`` / ``get_links``), so the walk below never sees a link even
+# before this set is consulted. The explicit entry is what keeps links
+# surviving if that upstream behaviour ever changes.
 _KEEP_ANNOT_TYPES = frozenset({_fitz.PDF_ANNOT_LINK})
 
 
@@ -234,10 +240,14 @@ def _scrub_residue(doc) -> None:
     payload live outside them, are never seen by detection, and shipped intact
     in every export before v0.6.6:
 
-    * **Annotation text** -- sticky notes (``/Text``), ``/FreeText``, comments.
-      Their text lives in the annot ``/Contents``, which ``page.get_text()``
-      does not return, so no detector can produce a match for it and no user
-      can redact it. Verified surviving a default burn against v0.6.5.
+    * **Annotation text** -- sticky notes (``/Text``), ``/FreeText``,
+      comments. Two distinct shapes, both verified surviving a default burn
+      against v0.6.5: a ``/Text`` note's content is NOT returned by
+      ``page.get_text()``, so no detector can match it and no user can
+      redact it; a ``/FreeText``'s text IS returned, so a match is produced
+      and a box drawn -- but the box burns the page CONTENT stream while the
+      text lives in the annot's own appearance stream, so it survives while
+      the user is told it was redacted.
     * **Embedded / attached files** -- a whole second document riding along.
       Verified: the payload came back byte-for-byte from ``embfile_get`` on a
       v0.6.5 export.

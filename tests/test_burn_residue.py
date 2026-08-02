@@ -274,7 +274,12 @@ def test_thumbnail_scrubbed_on_a_page_with_no_matches():
 def test_link_annotations_survive_the_scrub():
     """Non-overlapping links are a deliberate out-of-scope decision -- a
     /Link is a rect plus a destination and carries no free text of its own.
-    If this ever starts failing, it is a scope change, not a bug fix."""
+    If this ever starts failing, it is a scope change, not a bug fix.
+
+    Note the fence holds by two independent mechanisms: ``page.annots()``
+    does not yield links at all (pinned by the test below), AND
+    ``_KEEP_ANNOT_TYPES`` names Link explicitly.
+    """
     out, _ = apply_redactions(_make_residue_pdf(with_link=True), [BODY_MATCH])
     doc = fitz.open(stream=out, filetype="pdf")
     try:
@@ -284,6 +289,37 @@ def test_link_annotations_survive_the_scrub():
     assert LINK_URI in uris
     # ...and the text-bearing annots next to it still went.
     assert NOTE_TEXT.encode() not in out
+
+
+def test_annots_walk_does_not_yield_links():
+    """Pins the upstream behaviour the scope fence leans on first: links
+    live in the page's annotation xrefs but ``page.annots()`` skips them.
+    If pymupdf ever starts yielding them, ``_KEEP_ANNOT_TYPES`` becomes the
+    load-bearing half rather than belt-and-braces -- and this test is the
+    early warning."""
+    doc = fitz.open(stream=_make_residue_pdf(with_link=True), filetype="pdf")
+    try:
+        walked = {a.type[0] for a in doc[0].annots()}
+        xref_types = {t for _x, t, _i in doc[0].annot_xrefs()}
+    finally:
+        doc.close()
+    assert fitz.PDF_ANNOT_LINK not in walked
+    assert fitz.PDF_ANNOT_LINK in xref_types
+
+
+def test_freetext_is_visible_to_detection_yet_survived_before_the_fix():
+    """The sharper half of the vector, pinned on the FIXTURE (pre-burn):
+    unlike a sticky note, a /FreeText's text IS returned by get_text, so a
+    match is produced and the user is shown a box -- while the text lives
+    in the annot's appearance stream, outside what apply_redactions
+    rewrites. Same failure shape as the S660 widget /V leak."""
+    doc = fitz.open(stream=_make_residue_pdf(), filetype="pdf")
+    try:
+        page_text = doc[0].get_text()
+    finally:
+        doc.close()
+    assert FREETEXT_TEXT in page_text       # detection DOES see this one
+    assert NOTE_TEXT not in page_text       # ...and does not see this one
 
 
 def test_invisible_ocr_layer_survives_the_scrub():
