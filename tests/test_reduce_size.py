@@ -229,8 +229,9 @@ def test_preserve_subject_keeps_the_spec_13_stamp():
 
 
 def test_preserve_subject_does_not_leak_other_metadata():
-    """Preserving one key must not resurrect the rest -- producer/creator
-    are tool fingerprints and the dates are timeline leakage."""
+    """Preserving one key must not resurrect the rest -- the narrow request
+    is honoured narrowly, so an unnamed key stays stripped even though it
+    IS a legal key to name."""
     src = _make_stamped_pdf(
         subject=SPEC_13_SUBJECT, producer="SomeTool 9",
         creator="Scanner X", title="Case notes", author="A. Person",
@@ -242,6 +243,24 @@ def test_preserve_subject_does_not_leak_other_metadata():
         assert gone not in surviving
     assert b"Scanner X" not in out
     assert b"Case notes" not in out
+
+
+def test_preserve_all_three_spec_13_fields():
+    """The Spec-13 marking is subject + producer + keywords, all three a
+    stated launch invariant -- the scrub wipes all three, so all three must
+    be recoverable in one call."""
+    src = _make_stamped_pdf(
+        subject=SPEC_13_SUBJECT, producer="Lex Cloak 1.8.19",
+        keywords="redacted, auto-redacted", creator="Scanner X",
+    )
+    out, _ = reduce_size(
+        src, preserve_metadata=("subject", "producer", "keywords"))
+    surviving = _meta(out)
+    assert surviving["subject"] == SPEC_13_SUBJECT
+    assert surviving["producer"] == "Lex Cloak 1.8.19"
+    assert surviving["keywords"] == "redacted, auto-redacted"
+    # The key NOT named is still stripped -- opting in one does not opt in all.
+    assert "creator" not in surviving
 
 
 def test_preserve_metadata_accepts_multiple_keys():
@@ -278,17 +297,23 @@ def test_preserve_metadata_survives_the_dpi_downsample_path():
     assert "producer" not in _meta(out)
 
 
-@pytest.mark.parametrize("bad", [("producer",), ("creator",),
-                                 ("creationDate",), ("modDate",)])
-def test_preserve_metadata_refuses_fingerprint_and_date_keys(bad):
-    with pytest.raises(ValueError, match="non-preservable"):
-        reduce_size(_make_stamped_pdf(subject=SPEC_13_SUBJECT),
-                    preserve_metadata=bad)
+@pytest.mark.parametrize("key", ["producer", "creator", "creationDate",
+                                 "modDate", "title", "author", "keywords"])
+def test_every_writable_metadata_key_is_nameable(key):
+    """The check is known-key, not a safety allowlist: whether a key is safe
+    to keep is the caller's call, so every writable key must be nameable."""
+    src = _make_stamped_pdf(subject=SPEC_13_SUBJECT, **{key: "sentinel-value"})
+    out, _ = reduce_size(src, preserve_metadata=(key,))
+    assert _meta(out).get(key) == "sentinel-value"
 
 
-@pytest.mark.parametrize("bad", [("nope",), ("Subject",), ("",)])
+@pytest.mark.parametrize("bad", [("nope",), ("Subject",), ("subj",), ("",),
+                                 ("format",), ("encryption",)])
 def test_preserve_metadata_refuses_unknown_keys(bad):
-    with pytest.raises(ValueError, match="non-preservable"):
+    """Typo rejection is the point: a misspelled key is otherwise a silent
+    no-op, and a silently-dropped marking is the failure this prevents.
+    `format`/`encryption` are derived, not settable, so they are unknown."""
+    with pytest.raises(ValueError, match="unknown metadata key"):
         reduce_size(_make_stamped_pdf(subject=SPEC_13_SUBJECT),
                     preserve_metadata=bad)
 

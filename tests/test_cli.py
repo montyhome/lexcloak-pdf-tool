@@ -1457,19 +1457,44 @@ def test_reduce_size_h_wire_default_still_strips_subject():
 
 
 @pytest.mark.parametrize("op", ["reduce_size", "reduce_size_h"])
-def test_reduce_size_wire_rejects_non_preservable_key(op):
-    """A fingerprint key must be refused on BOTH ops, as a clean protocol
-    error rather than a silently-ignored request."""
-    src = _make_stamped_pdf(subject=_SPEC_13, producer="SomeTool 9")
+def test_reduce_size_wire_rejects_unknown_key(op):
+    """A misspelled key must be refused on BOTH ops as a clean protocol
+    error -- silently ignoring it drops the caller's marking, which is the
+    failure this parameter exists to prevent."""
+    src = _make_stamped_pdf(subject=_SPEC_13)
     with CLISession() as s:
         if op.endswith("_h"):
             resp = s.call(op, handle=_open(s, src),
-                          preserve_metadata=["producer"])
+                          preserve_metadata=["Subject"])
         else:
             resp = s.call(op, pdf_b64=_b64(src),
-                          preserve_metadata=["producer"])
+                          preserve_metadata=["Subject"])
     assert resp["ok"] is False, resp
-    assert "non-preservable" in json.dumps(resp)
+    assert "unknown metadata key" in json.dumps(resp)
+
+
+@pytest.mark.parametrize("op", ["reduce_size", "reduce_size_h"])
+def test_reduce_size_wire_preserves_all_three_spec_13_fields(op):
+    """subject + producer + keywords, the full Spec-13 marking, across both
+    wire ops."""
+    src = _make_stamped_pdf(subject=_SPEC_13, producer="Lex Cloak 1.8.19",
+                            keywords="redacted, auto-redacted")
+    keys = ["subject", "producer", "keywords"]
+    with CLISession() as s:
+        if op.endswith("_h"):
+            resp = s.call(op, handle=_open(s, src), preserve_metadata=keys)
+        else:
+            resp = s.call(op, pdf_b64=_b64(src), preserve_metadata=keys)
+    assert resp["ok"] is True, resp
+    doc = fitz.open(stream=base64.b64decode(resp["result"]["pdf_b64"]),
+                    filetype="pdf")
+    try:
+        meta = dict(doc.metadata)
+    finally:
+        doc.close()
+    assert meta["subject"] == _SPEC_13
+    assert meta["producer"] == "Lex Cloak 1.8.19"
+    assert meta["keywords"] == "redacted, auto-redacted"
 
 
 def test_reduce_size_wire_rejects_bare_string_preserve_metadata():

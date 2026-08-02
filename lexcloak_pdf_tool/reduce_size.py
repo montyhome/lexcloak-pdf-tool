@@ -70,11 +70,22 @@ def _validate_reduce_params(dpi, quality) -> None:
         raise ValueError(f"quality must be in 1..100, got {quality}")
 
 
-# Metadata keys ``preserve_metadata`` will restore. Restricted to the
-# descriptive, caller-authored fields -- never ``producer``/``creator``
-# (tool fingerprints) or the date fields (timeline leakage), which the
-# scrub exists to remove.
-_PRESERVABLE_METADATA_KEYS = frozenset({"subject", "title", "author", "keywords"})
+# The writable PDF metadata keys -- the legal values for
+# ``preserve_metadata``. This is a KNOWN-KEY check, NOT a safety allowlist.
+# Which keys are safe to keep is the CALLER's decision and this package
+# cannot make it: ``producer`` holding "Lex Cloak 1.8.19" is a deliberate
+# post-redaction marking, ``producer`` holding "HP Scanner 4.2" is a
+# fingerprint leak -- same key, same type, opposite meanings, and only the
+# caller knows which one the document is carrying. What the check DOES buy
+# is typo rejection ("Subject", "subj"), because a misspelled key is a
+# silent no-op and a silently-dropped marking is the exact failure this
+# parameter exists to prevent. The safe default does the real work here and
+# is unchanged: preserve nothing unless explicitly asked.
+# ``format`` / ``encryption`` are excluded -- derived, not settable.
+_PRESERVABLE_METADATA_KEYS = frozenset({
+    "title", "author", "subject", "keywords", "creator", "producer",
+    "creationDate", "modDate",
+})
 
 
 def _validate_preserve_metadata(preserve_metadata) -> frozenset[str]:
@@ -98,8 +109,8 @@ def _validate_preserve_metadata(preserve_metadata) -> frozenset[str]:
     unknown = keys - _PRESERVABLE_METADATA_KEYS
     if unknown:
         raise ValueError(
-            "preserve_metadata contains non-preservable key(s): "
-            f"{sorted(unknown)}; allowed: {sorted(_PRESERVABLE_METADATA_KEYS)}"
+            "preserve_metadata contains unknown metadata key(s): "
+            f"{sorted(unknown)}; known: {sorted(_PRESERVABLE_METADATA_KEYS)}"
         )
     return keys
 
@@ -221,13 +232,15 @@ def reduce_size(
     shape as v0.6.5's ``numeric_token_boundary`` -- and for the same reason
     v0.6.4 was superseded, which applied its change unconditionally.
 
-    Only :data:`_PRESERVABLE_METADATA_KEYS` may be named; ``producer``,
-    ``creator`` and the date fields are refused because preserving them would
-    re-introduce exactly the fingerprint/timeline leakage the scrub removes.
+    Keys are validated against :data:`_PRESERVABLE_METADATA_KEYS`, which is
+    a known-key check and not a safety allowlist -- see the comment there.
+    **Whether a given key is safe to keep is the caller's decision**: this
+    op cannot distinguish a deliberate post-redaction marking from the
+    original document's fingerprint, because they are the same key holding
+    different strings. Preserve the narrowest set that carries your marking.
 
-    Raises ``ValueError`` on a bad ``dpi``/``quality``, an unknown or
-    non-preservable ``preserve_metadata`` key, or on encrypted
-    (password-protected) input.
+    Raises ``ValueError`` on a bad ``dpi``/``quality``, an unknown
+    ``preserve_metadata`` key, or on encrypted (password-protected) input.
     """
     _validate_reduce_params(dpi, quality)
     # Validate early so a bad key fails before any document work; the
