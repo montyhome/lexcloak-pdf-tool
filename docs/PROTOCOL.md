@@ -354,6 +354,7 @@ scrub + font subsetting); opt-in image downsample when `dpi` is given.
 | `dpi` | int or null | `null` (lossless — no image downsample) |
 | `quality` | int 1..100 | `75` (JPEG quality when downsampling) |
 | `grayscale` | bool | `false` (convert downsampled images to gray) |
+| `preserve_metadata` | array of string or null | `null` (v0.6.6 — strip everything, historical behaviour) |
 
 **Result:** `{"pdf_b64": str, "info": {"orig_size": int, "new_size": int, "applied_dpi": int|null}}`.
 
@@ -364,6 +365,26 @@ returns bytes larger than the input (no-grow guard) and preserves the
 OCR/selectable text layer. Encrypted/password-protected input returns
 `error_type: "ValueError"` — the op requires cleartext (the redaction
 route compresses before any optional encryption).
+
+`preserve_metadata` (v0.6.6) names metadata keys to carry across the
+scrub. The lossless scrub strips the whole metadata dict, including any
+marking the **caller** applied after redacting — Lex Cloak's Spec-13
+"Auto-redacted" notice lives in `subject` and was erased by every
+successful compression before this field existed. Send
+`["subject"]` to keep it.
+
+Allowed keys are `subject`, `title`, `author`, `keywords`. Anything else
+— notably `producer`, `creator`, `creationDate`, `modDate` — returns
+`error_type: "ValueError"`, because preserving those would re-introduce
+the tool-fingerprint and timeline leakage the scrub exists to remove. A
+bare string instead of an array is also rejected rather than iterated
+into characters. The field is opt-in rather than default-on because this
+is a general op: flipping the default would start preserving arbitrary
+third-party document metadata that callers rely on it to strip.
+
+An older subprocess that predates v0.6.6 ignores the field (unknown keys
+have always been ignored on this wire) and strips the metadata as before
+— the caller sees a missing stamp, not a protocol error.
 
 ### `exit`
 
