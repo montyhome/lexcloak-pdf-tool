@@ -4,17 +4,17 @@ from __future__ import annotations
 import io
 import logging
 
-import fitz as _fitz
+import pymupdf as _pymupdf
 
-PDF_ENCRYPT_AES_256 = _fitz.PDF_ENCRYPT_AES_256
-PDF_PERM_ACCESSIBILITY = _fitz.PDF_PERM_ACCESSIBILITY
-Rect = _fitz.Rect
-TEXT_ALIGN_CENTER = _fitz.TEXT_ALIGN_CENTER
+PDF_ENCRYPT_AES_256 = _pymupdf.PDF_ENCRYPT_AES_256
+PDF_PERM_ACCESSIBILITY = _pymupdf.PDF_PERM_ACCESSIBILITY
+Rect = _pymupdf.Rect
+TEXT_ALIGN_CENTER = _pymupdf.TEXT_ALIGN_CENTER
 
 
-def open_pdf(pdf_bytes: bytes) -> _fitz.Document:
+def open_pdf(pdf_bytes: bytes) -> _pymupdf.Document:
     """Open a PDF from bytes -- module-local helper."""
-    return _fitz.open(stream=pdf_bytes, filetype="pdf")
+    return _pymupdf.open(stream=pdf_bytes, filetype="pdf")
 
 
 def _validate_redaction_payload(matches: list[dict],
@@ -98,7 +98,7 @@ def _validate_redaction_payload(matches: list[dict],
 
 
 def _strip_metadata_doc(doc) -> None:
-    """Remove all document metadata + XMP from a live ``fitz.Document``.
+    """Remove all document metadata + XMP from a live ``pymupdf.Document``.
 
     Strips author, title, subject, creator, producer, creation/mod dates,
     keywords, and the full XMP metadata stream.
@@ -120,7 +120,7 @@ def strip_metadata(pdf_bytes_or_doc):
     """Strip document metadata + XMP. Accepts bytes (IPC form) or Document.
 
     * ``bytes`` -> returns ``bytes`` with metadata stripped (IPC-clean form).
-    * ``fitz.Document`` -> mutates in place, returns ``None``.
+    * ``pymupdf.Document`` -> mutates in place, returns ``None``.
     """
     if isinstance(pdf_bytes_or_doc, (bytes, bytearray)):
         doc = open_pdf(bytes(pdf_bytes_or_doc))
@@ -153,7 +153,7 @@ def _has_any_widget(doc) -> bool:
     """
     for page in doc:
         for entry in page.annot_xrefs():
-            if entry[1] == _fitz.PDF_ANNOT_WIDGET:
+            if entry[1] == _pymupdf.PDF_ANNOT_WIDGET:
                 return True
     return False
 
@@ -205,7 +205,7 @@ def _flatten_form_fields(doc) -> None:
 # ``annot_xrefs`` / ``get_links``), so the walk below never sees a link even
 # before this set is consulted. The explicit entry is what keeps links
 # surviving if that upstream behaviour ever changes.
-_KEEP_ANNOT_TYPES = frozenset({_fitz.PDF_ANNOT_LINK})
+_KEEP_ANNOT_TYPES = frozenset({_pymupdf.PDF_ANNOT_LINK})
 
 
 def null_page_thumbnails(doc) -> int:
@@ -425,7 +425,7 @@ def _apply_redactions_doc(doc, matches: list[dict],
                           *,
                           output_protection: dict | None = None
                           ) -> tuple[bytes, bool]:
-    """Apply redactions to an open ``fitz.Document`` and return (bytes, protected).
+    """Apply redactions to an open ``pymupdf.Document`` and return (bytes, protected).
 
     Mutates ``doc`` in place: AcroForm widgets are flattened to static content,
     redaction annotations are applied, ``blackout_pages`` are fully blacked out,

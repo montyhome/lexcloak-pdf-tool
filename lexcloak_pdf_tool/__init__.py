@@ -43,10 +43,10 @@ Plus ``pymupdf_version()`` (probe) and CharData serialization helpers in
 """
 from __future__ import annotations
 
-import fitz as _fitz
+import pymupdf as _pymupdf
 
 
-version = _fitz.version
+version = _pymupdf.version
 
 #: Package version -- the single source of truth. ``pyproject.toml`` derives
 #: its version from this attribute (setuptools dynamic ``version = {attr =
@@ -54,12 +54,12 @@ version = _fitz.version
 #: back to it when ``importlib.metadata`` has no dist-info to read (e.g. inside
 #: the frozen PyInstaller bundle). Keep it a plain string literal so
 #: setuptools can extract it statically without importing this module.
-__version__ = "0.6.6"
+__version__ = "0.6.7"
 
 
 def pymupdf_version() -> str:
-    """Return PyMuPDF's version string (``fitz.version[0]``)."""
-    return _fitz.version[0]
+    """Return PyMuPDF's version string (``pymupdf.version[0]``)."""
+    return _pymupdf.version[0]
 
 
 from .render import render_page  # noqa: E402

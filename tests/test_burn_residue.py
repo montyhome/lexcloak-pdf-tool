@@ -39,7 +39,7 @@ Synthetic fixtures only (per ``feedback_synthetic_fixtures_only``).
 """
 from __future__ import annotations
 
-import fitz
+import pymupdf
 import pytest
 
 from lexcloak_pdf_tool import apply_redactions
@@ -80,22 +80,22 @@ def _make_residue_pdf(
     ocr_token: str | None = None,
 ) -> bytes:
     """Synthetic PDF carrying the residue vectors under test."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     for _ in range(n_pages):
         page = doc.new_page(width=612, height=792)
-        page.insert_text(fitz.Point(50, 100), BODY_TEXT, fontsize=12)
+        page.insert_text(pymupdf.Point(50, 100), BODY_TEXT, fontsize=12)
         if ocr_token is not None:
-            page.insert_text(fitz.Point(50, 140), ocr_token,
+            page.insert_text(pymupdf.Point(50, 140), ocr_token,
                              fontsize=12, render_mode=3)
 
     page = doc[annot_page]
-    page.add_text_annot(fitz.Point(300, 200), NOTE_TEXT)
-    ft = page.add_freetext_annot(fitz.Rect(300, 300, 560, 340), FREETEXT_TEXT)
+    page.add_text_annot(pymupdf.Point(300, 200), NOTE_TEXT)
+    ft = page.add_freetext_annot(pymupdf.Rect(300, 300, 560, 340), FREETEXT_TEXT)
     ft.update()
     if with_link:
         page.insert_link({
-            "kind": fitz.LINK_URI,
-            "from": fitz.Rect(50, 400, 200, 420),
+            "kind": pymupdf.LINK_URI,
+            "from": pymupdf.Rect(50, 400, 200, 420),
             "uri": LINK_URI,
         })
 
@@ -115,7 +115,7 @@ def _make_residue_pdf(
 
 def _annot_inventory(pdf_bytes: bytes) -> list[tuple[str, str]]:
     """(subtype, contents) for every annotation in the exported bytes."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         return [(a.type[1], a.info.get("content", ""))
                 for page in doc for a in page.annots()]
@@ -124,7 +124,7 @@ def _annot_inventory(pdf_bytes: bytes) -> list[tuple[str, str]]:
 
 
 def _embfile_names(pdf_bytes: bytes) -> list[str]:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         return list(doc.embfile_names())
     finally:
@@ -132,7 +132,7 @@ def _embfile_names(pdf_bytes: bytes) -> list[str]:
 
 
 def _page_text(pdf_bytes: bytes, pno: int = 0) -> str:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         return doc.load_page(pno).get_text()
     finally:
@@ -140,7 +140,7 @@ def _page_text(pdf_bytes: bytes, pno: int = 0) -> str:
 
 
 def _page_count(pdf_bytes: bytes) -> int:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         return doc.page_count
     finally:
@@ -188,7 +188,7 @@ def test_document_javascript_name_tree_is_dropped():
     a matter or custodian would ride out in a "carries nothing along"
     export. The catalog key must go, not just the script body."""
     out, _ = apply_redactions(_make_residue_pdf(), [BODY_MATCH])
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         names = doc.xref_get_key(doc.pdf_catalog(), "Names/JavaScript")
     finally:
@@ -199,7 +199,7 @@ def test_document_javascript_name_tree_is_dropped():
 
 def _attach_thumbnail(pdf_bytes: bytes, pno: int = 0) -> bytes:
     """Give page ``pno`` a /Thumb raster of its own pre-burn appearance."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     page = doc[pno]
     pix = page.get_pixmap(dpi=12)
     thumb_xref = doc.get_new_xref()
@@ -212,7 +212,7 @@ def _attach_thumbnail(pdf_bytes: bytes, pno: int = 0) -> bytes:
 
 
 def _thumb_key(pdf_bytes: bytes, pno: int = 0):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         return doc.xref_get_key(doc[pno].xref, "Thumb")
     finally:
@@ -241,7 +241,7 @@ def test_thumbnail_raster_bytes_do_not_survive_the_burn():
     """Nulling the key must actually orphan the stream, not just unlink a
     reference that garbage collection then keeps alive."""
     src = _attach_thumbnail(_make_residue_pdf())
-    pre = fitz.open(stream=src, filetype="pdf")
+    pre = pymupdf.open(stream=src, filetype="pdf")
     try:
         pre_streams = sum(1 for x in range(1, pre.xref_length())
                           if pre.xref_is_stream(x))
@@ -249,7 +249,7 @@ def test_thumbnail_raster_bytes_do_not_survive_the_burn():
         pre.close()
 
     out, _ = apply_redactions(src, [BODY_MATCH])
-    post = fitz.open(stream=out, filetype="pdf")
+    post = pymupdf.open(stream=out, filetype="pdf")
     try:
         post_streams = sum(1 for x in range(1, post.xref_length())
                            if post.xref_is_stream(x))
@@ -281,7 +281,7 @@ def test_link_annotations_survive_the_scrub():
     ``_KEEP_ANNOT_TYPES`` names Link explicitly.
     """
     out, _ = apply_redactions(_make_residue_pdf(with_link=True), [BODY_MATCH])
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         uris = [lk.get("uri") for lk in doc[0].get_links()]
     finally:
@@ -297,14 +297,14 @@ def test_annots_walk_does_not_yield_links():
     If pymupdf ever starts yielding them, ``_KEEP_ANNOT_TYPES`` becomes the
     load-bearing half rather than belt-and-braces -- and this test is the
     early warning."""
-    doc = fitz.open(stream=_make_residue_pdf(with_link=True), filetype="pdf")
+    doc = pymupdf.open(stream=_make_residue_pdf(with_link=True), filetype="pdf")
     try:
         walked = {a.type[0] for a in doc[0].annots()}
         xref_types = {t for _x, t, _i in doc[0].annot_xrefs()}
     finally:
         doc.close()
-    assert fitz.PDF_ANNOT_LINK not in walked
-    assert fitz.PDF_ANNOT_LINK in xref_types
+    assert pymupdf.PDF_ANNOT_LINK not in walked
+    assert pymupdf.PDF_ANNOT_LINK in xref_types
 
 
 def test_freetext_is_visible_to_detection_yet_survived_before_the_fix():
@@ -313,7 +313,7 @@ def test_freetext_is_visible_to_detection_yet_survived_before_the_fix():
     match is produced and the user is shown a box -- while the text lives
     in the annot's appearance stream, outside what apply_redactions
     rewrites. Same failure shape as the S660 widget /V leak."""
-    doc = fitz.open(stream=_make_residue_pdf(), filetype="pdf")
+    doc = pymupdf.open(stream=_make_residue_pdf(), filetype="pdf")
     try:
         page_text = doc[0].get_text()
     finally:
@@ -346,7 +346,7 @@ def test_page_count_unchanged_by_the_scrub():
 
 def test_document_with_no_residue_is_unaffected():
     src = _make_residue_pdf(with_attachment=False, with_javascript=False)
-    doc = fitz.open(stream=src, filetype="pdf")
+    doc = pymupdf.open(stream=src, filetype="pdf")
     for page in doc:
         for annot in list(page.annots()):
             page.delete_annot(annot)
@@ -389,9 +389,9 @@ def test_residue_on_removed_page_goes_with_the_page():
 
 
 def test_residue_scrubbed_on_every_page_of_a_multipage_doc():
-    doc = fitz.open(stream=_make_residue_pdf(n_pages=3), filetype="pdf")
+    doc = pymupdf.open(stream=_make_residue_pdf(n_pages=3), filetype="pdf")
     for pno in (1, 2):
-        doc[pno].add_text_annot(fitz.Point(300, 200), NOTE_TEXT)
+        doc[pno].add_text_annot(pymupdf.Point(300, 200), NOTE_TEXT)
     src = doc.tobytes(garbage=4, deflate=True)
     doc.close()
     assert len(_annot_inventory(src)) == 4      # 2 on page 0, 1 each on 1-2
@@ -414,7 +414,7 @@ def test_residue_scrubbed_under_encrypted_output():
     )
     assert protected is True
 
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert doc.authenticate("pw-sentinel")
         inventory = [(a.type[1], a.info.get("content", ""))
@@ -432,8 +432,8 @@ def test_residue_scrubbed_under_encrypted_output():
 def test_unapplied_source_redaction_annots_do_not_survive():
     """A source PDF can arrive with someone else's un-applied /Redact
     annots. They must not ride into a Lex Cloak export as live annotations."""
-    doc = fitz.open(stream=_make_residue_pdf(), filetype="pdf")
-    doc[0].add_redact_annot(fitz.Rect(400, 500, 500, 520), fill=(0, 0, 0))
+    doc = pymupdf.open(stream=_make_residue_pdf(), filetype="pdf")
+    doc[0].add_redact_annot(pymupdf.Rect(400, 500, 500, 520), fill=(0, 0, 0))
     src = doc.tobytes(garbage=4, deflate=True)
     doc.close()
     assert any(t == "Redact" for t, _ in _annot_inventory(src))

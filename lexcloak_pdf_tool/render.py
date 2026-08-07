@@ -1,11 +1,11 @@
 """Page rendering -- PNG bytes."""
 from __future__ import annotations
 
-import fitz as _fitz
+import pymupdf as _pymupdf
 
 from .redact import open_pdf
 
-Matrix = _fitz.Matrix
+Matrix = _pymupdf.Matrix
 
 
 def _render_page_doc(doc, page_num: int, dpi: float = 150) -> bytes:

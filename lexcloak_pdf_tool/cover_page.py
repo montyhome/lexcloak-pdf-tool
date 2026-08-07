@@ -11,7 +11,7 @@ Helvetica that ``insert_textbox`` defaults to has no glyph for U+2014;
 the Story engine ships a sans-serif fallback that does.
 
 Each public ``<func>(pdf_bytes, context)`` opens a fresh
-``fitz.Document``, calls the matching ``_<func>_doc(doc, context)``
+``pymupdf.Document``, calls the matching ``_<func>_doc(doc, context)``
 helper, then closes. The ``_doc`` helper is reused by the CLI's
 stateful handle protocol (v4) so the doc stays cached.
 """
@@ -20,7 +20,7 @@ from __future__ import annotations
 import html as _html
 import io
 
-import fitz as _fitz
+import pymupdf as _pymupdf
 
 from .redact import open_pdf
 
@@ -129,7 +129,7 @@ def _insert_cover_page_doc(doc, context: dict) -> None:
     width, height = _pick_page_size(doc)
     page = doc.new_page(pno=0, width=width, height=height)
 
-    content_rect = _fitz.Rect(
+    content_rect = _pymupdf.Rect(
         _MARGIN, _MARGIN,
         width - _MARGIN, height - _MARGIN,
     )

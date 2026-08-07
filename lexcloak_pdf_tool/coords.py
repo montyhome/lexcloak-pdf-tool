@@ -18,8 +18,8 @@ them. The CLI speaks the flat form on the wire.
 
 The chardata search functions (:func:`search_in_chars`,
 :func:`search_whole_word_in_chars`, :func:`split_search_in_chars`) return
-:class:`_RectTuple` objects -- a fitz-free shape that mirrors
-``fitz.Rect``'s accessor API (``x0/y0/x1/y1/width/height``).
+:class:`_RectTuple` objects -- a pymupdf-free shape that mirrors
+``pymupdf.Rect``'s accessor API (``x0/y0/x1/y1/width/height``).
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ _MAX_OCR_LINE_H = 30.0
 
 
 class _RectTuple:
-    """Tuple-shaped rectangle compatible with ``fitz.Rect`` accessors.
+    """Tuple-shaped rectangle compatible with ``pymupdf.Rect`` accessors.
 
     Used as the return shape of :func:`search_in_chars`,
     :func:`search_whole_word_in_chars`, and :func:`split_search_in_chars`.

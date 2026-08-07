@@ -4,7 +4,7 @@ Cheap inspection ops for callers that need page count, page size, or
 encryption state without touching the document body. Also houses
 ``set_metadata`` (write op), the symmetric counterpart to ``get_metadata``.
 
-Each public ``<func>(pdf_bytes, ...)`` opens a fresh ``fitz.Document``,
+Each public ``<func>(pdf_bytes, ...)`` opens a fresh ``pymupdf.Document``,
 calls the matching ``_<func>_doc(doc, ...)`` helper, then closes. The
 ``_doc`` helpers are also reused by the CLI's stateful handle protocol
 (v0.4.0+) where the document is held open across multiple ops.

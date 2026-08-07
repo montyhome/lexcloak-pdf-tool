@@ -28,7 +28,7 @@ multi-page, empty doc); side-effect verification on output bytes.
 """
 from __future__ import annotations
 
-import fitz
+import pymupdf
 
 from lexcloak_pdf_tool import apply_redactions
 
@@ -42,12 +42,12 @@ WIDGET_RECT = (100.0, 100.0, 400.0, 130.0)
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
-def _text_widget(name: str, value: str, rect: tuple) -> fitz.Widget:
-    w = fitz.Widget()
+def _text_widget(name: str, value: str, rect: tuple) -> pymupdf.Widget:
+    w = pymupdf.Widget()
     w.field_name = name
-    w.field_type = fitz.PDF_WIDGET_TYPE_TEXT
+    w.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
     w.field_value = value
-    w.rect = fitz.Rect(*rect)
+    w.rect = pymupdf.Rect(*rect)
     w.text_fontsize = 11
     return w
 
@@ -62,7 +62,7 @@ def _make_acroform_pdf(field_value: str = FIELD_PII,
     ``extra_text_fields`` is a list of ``(name, value, rect)`` placed on page 0
     and never redacted by the tests (they assert retention-as-static).
     """
-    doc = fitz.open()
+    doc = pymupdf.open()
     for _ in range(n_pages):
         doc.new_page(width=612, height=792)
     for i in range(n_pages):
@@ -71,11 +71,11 @@ def _make_acroform_pdf(field_value: str = FIELD_PII,
         for name, value, r in extra_text_fields:
             doc[0].add_widget(_text_widget(name, value, r))
     if add_checkbox:
-        cb = fitz.Widget()
+        cb = pymupdf.Widget()
         cb.field_name = "consent"
-        cb.field_type = fitz.PDF_WIDGET_TYPE_CHECKBOX
+        cb.field_type = pymupdf.PDF_WIDGET_TYPE_CHECKBOX
         cb.field_value = True
-        cb.rect = fitz.Rect(100, 200, 120, 220)
+        cb.rect = pymupdf.Rect(100, 200, 120, 220)
         doc[0].add_widget(cb)
     out = doc.tobytes()
     doc.close()
@@ -94,10 +94,10 @@ def _match_for(rect: tuple, page: int = 0, type_: str = "Manual Region") -> dict
 def _is_dark_at(pdf_bytes: bytes, page: int, x_pt: float, y_pt: float,
                 dpi: float = 144.0) -> bool:
     """True if the as-rendered pixel at (x_pt, y_pt) point-space is near-black."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         zoom = dpi / 72.0
-        pix = doc[page].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        pix = doc[page].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
         r, g, b = pix.pixel(int(x_pt * zoom), int(y_pt * zoom))[:3]
         return r < 40 and g < 40 and b < 40
     finally:
@@ -111,7 +111,7 @@ def test_redacted_form_field_value_absent_from_output_text():
     """The widget /V must NOT survive in the redacted output's get_text()."""
     pdf = _make_acroform_pdf()
     out, _ = apply_redactions(pdf, [_match_for(WIDGET_RECT)])
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     text = doc[0].get_text()
     doc.close()
     assert SSN not in text
@@ -130,7 +130,7 @@ def test_redacted_form_leaves_no_interactive_widget():
     """No interactive widget (which would carry /V) survives in the output."""
     pdf = _make_acroform_pdf(add_checkbox=True)
     out, _ = apply_redactions(pdf, [_match_for(WIDGET_RECT)])
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     surviving = list(doc[0].widgets())
     is_form = doc.is_form_pdf
     doc.close()
@@ -156,7 +156,7 @@ def test_multipage_form_fields_all_redacted():
     matches = [_match_for(WIDGET_RECT, page=p) for p in range(3)]
     out, _ = apply_redactions(pdf, matches)
     assert SSN.encode() not in out
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         for p in range(3):
             assert SSN not in doc[p].get_text(), f"page {p} leaked the field value"
@@ -170,7 +170,7 @@ def test_empty_value_form_field_redaction_is_clean():
     pdf = _make_acroform_pdf(field_value="")
     out, _ = apply_redactions(pdf, [_match_for(WIDGET_RECT)])
     assert out[:4] == b"%PDF"
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert list(doc[0].widgets()) == []
     finally:
@@ -182,7 +182,7 @@ def test_checkbox_widget_flattened_too():
     pdf = _make_acroform_pdf(add_checkbox=True)
     # Redact only the text field; the checkbox is elsewhere but still flattens.
     out, _ = apply_redactions(pdf, [_match_for(WIDGET_RECT)])
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert list(doc[0].widgets()) == []
     finally:
@@ -202,7 +202,7 @@ def test_encrypted_output_form_field_value_absent():
         output_protection={"mode": "new", "password": password},
     )
     assert protected is True
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     assert doc.needs_pass, "output should be encrypted"
     assert doc.authenticate(password) > 0
     try:
@@ -224,7 +224,7 @@ def test_unredacted_form_field_value_retained_as_static_content():
     )
     # Redact ONLY the PII field; the "keep" field is left alone.
     out, _ = apply_redactions(pdf, [_match_for(WIDGET_RECT)])
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     text = doc[0].get_text()
     doc.close()
     assert SSN not in text                  # redacted field gone
@@ -234,15 +234,15 @@ def test_unredacted_form_field_value_retained_as_static_content():
 def test_no_form_pdf_redaction_unaffected():
     """A non-form PDF redacts exactly as before — the flatten step is a no-op
     (is_form_pdf guard), and output carries no widgets."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792).insert_text(
-        fitz.Point(50, 100), f"Patient SSN {SSN}", fontsize=12)
+        pymupdf.Point(50, 100), f"Patient SSN {SSN}", fontsize=12)
     pdf = doc.tobytes()
     doc.close()
     matches = [_match_for((30, 80, 300, 120), type_="SSN")]
     out, _ = apply_redactions(pdf, matches)
     assert SSN.encode() not in out
-    odoc = fitz.open(stream=out, filetype="pdf")
+    odoc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert SSN not in odoc[0].get_text()
         assert list(odoc[0].widgets()) == []
@@ -270,9 +270,9 @@ def _make_orphan_widget_pdf(page_rotate: int = 0) -> bytes:
     catalog /AcroForm key is nulled AFTER add_widget so the widgets stay in
     the page /Annots but vanish from the document form tree — the
     generator/form-filler output shape."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_text(fitz.Point(100, 90), "STATIC anchor text", fontsize=11)
+    page.insert_text(pymupdf.Point(100, 90), "STATIC anchor text", fontsize=11)
     page.add_widget(_text_widget("pii_field", FIELD_PII, WIDGET_RECT))
     page.add_widget(_text_widget("keep_field", KEEP_VALUE, KEEP_RECT))
     doc.xref_set_key(doc.pdf_catalog(), "AcroForm", "null")
@@ -287,7 +287,7 @@ def test_orphan_premise_is_form_pdf_false_but_widgets_present():
     """Premise pin: the fixture really is orphan-shaped — is_form_pdf FALSE
     with live page widgets whose values extract. If this ever fails, the
     orphan tests below are no longer testing the orphan class."""
-    doc = fitz.open(stream=_make_orphan_widget_pdf(), filetype="pdf")
+    doc = pymupdf.open(stream=_make_orphan_widget_pdf(), filetype="pdf")
     try:
         assert not doc.is_form_pdf
         assert len(list(doc[0].widgets())) == 2
@@ -306,7 +306,7 @@ def test_orphan_widget_value_redacted_from_text_and_bytes():
     assert NAME.encode() not in out
     assert b"/Widget" not in out
     assert b"/AcroForm" not in out
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         text = doc[0].get_text()
         assert SSN not in text
@@ -322,7 +322,7 @@ def test_orphan_unredacted_field_retained_as_static_text():
     not as a live widget."""
     pdf = _make_orphan_widget_pdf()
     out, _ = apply_redactions(pdf, [_match_for(WIDGET_RECT)])
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert KEEP_VALUE in doc[0].get_text()
         assert list(doc[0].widgets()) == []
@@ -346,7 +346,7 @@ def test_orphan_page_blackout_scrubs_widget_values(page_rotate):
     assert KEEP_VALUE.encode() not in out
     assert b"/Widget" not in out
     assert b"/AcroForm" not in out
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert doc[0].get_text().strip() == ""
     finally:
@@ -361,17 +361,17 @@ def test_no_widget_doc_never_calls_bake(monkeypatch):
     (byte-identical pre-v0.5.2 path). The counter wraps the REAL bake so a
     widget doc still flattens through it — mock integrity."""
     calls = {"n": 0}
-    real_bake = fitz.Document.bake
+    real_bake = pymupdf.Document.bake
 
     def counting_bake(self, *args, **kwargs):
         calls["n"] += 1
         return real_bake(self, *args, **kwargs)
 
-    monkeypatch.setattr(fitz.Document, "bake", counting_bake)
+    monkeypatch.setattr(pymupdf.Document, "bake", counting_bake)
 
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792).insert_text(
-        fitz.Point(50, 100), f"Patient SSN {SSN}", fontsize=12)
+        pymupdf.Point(50, 100), f"Patient SSN {SSN}", fontsize=12)
     pdf = doc.tobytes()
     doc.close()
     out, _ = apply_redactions(pdf, [_match_for((30, 80, 300, 120),

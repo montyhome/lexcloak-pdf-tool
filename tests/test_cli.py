@@ -10,16 +10,20 @@ Resilience cases:
   * mid-stream disconnect
   * malformed length prefix (truncated header)
   * garbage stdin bytes / malformed JSON between commands
+  * stdout cleanliness -- at runtime (MuPDF C-side warnings) and at import
+    time (a dependency printing on fd 1 before any handler is installed)
 """
 from __future__ import annotations
 
 import base64
 import json
+import pathlib
+import re
 import struct
 import subprocess
 import sys
 
-import fitz
+import pymupdf
 import pytest
 
 
@@ -99,10 +103,10 @@ class CLISession:
 def _make_pdf(text: str = "Patient SSN 123-45-6789",
               x: float = 50, y: float = 100,
               fontsize: float = 12, n_pages: int = 1) -> bytes:
-    doc = fitz.open()
+    doc = pymupdf.open()
     for _ in range(n_pages):
         page = doc.new_page(width=612, height=792)
-        page.insert_text(fitz.Point(x, y), text, fontsize=fontsize)
+        page.insert_text(pymupdf.Point(x, y), text, fontsize=fontsize)
     pdf_bytes = doc.tobytes()
     doc.close()
     return pdf_bytes
@@ -124,9 +128,9 @@ def _make_pdf_triggering_mupdf_warning() -> bytes:
     contaminating stdout's IPC channel.
     """
     import re
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_text(fitz.Point(50, 100), "Hello", fontsize=12)
+    page.insert_text(pymupdf.Point(50, 100), "Hello", fontsize=12)
     pdf = doc.tobytes()
     doc.close()
     m = re.search(rb"stream\n(.*?)\nendstream", pdf, re.DOTALL)
@@ -174,10 +178,10 @@ def test_is_encrypted_roundtrip_plaintext():
 
 
 def test_is_encrypted_roundtrip_real_pw():
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792)
     pdf = doc.tobytes(
-        encryption=fitz.PDF_ENCRYPT_AES_256,
+        encryption=pymupdf.PDF_ENCRYPT_AES_256,
         user_pw="real-password",
         owner_pw="real-password",
     )
@@ -202,7 +206,7 @@ def test_render_does_not_contaminate_stdout_with_mupdf_warnings():
     ahead of the length-prefixed JSON response. The first 4 leaked bytes
     (typically ``M u P D`` from ``"MuPDF error: ..."``) were read as a
     bogus uint32 length prefix (1,299,533,892), exceeding ``MAX_PAYLOAD_BYTES``
-    and breaking the IPC. ``__main__.py`` now calls ``fitz.set_messages``
+    and breaking the IPC. ``__main__.py`` now calls ``pymupdf.set_messages``
     at startup to redirect MuPDF's C-side messages to stderr.
     """
     pdf = _make_pdf_triggering_mupdf_warning()
@@ -246,6 +250,52 @@ def test_render_routes_mupdf_warning_text_to_stderr():
     assert "MuPDF" in stderr_text, (
         f"expected MuPDF warning on stderr, got: {stderr_text!r}"
     )
+
+
+def test_importing_the_package_writes_nothing_to_stdout():
+    """Regression: nothing may touch stdout at IMPORT time.
+
+    The two tests above cover *runtime* leaks, which ``set_messages`` can
+    redirect. An import-time write is a strictly worse failure: it lands
+    before any mitigation this package installs, so the very first frame
+    the parent reads is already garbage.
+
+    That is not hypothetical. PyMuPDF 1.28.2 made ``import fitz`` print
+    ``"warning: The `fitz` API is deprecated ..."`` (99 bytes) to stdout,
+    and the parent read ``w a r n`` (0x7761726E = 2,002,874,990) as a frame
+    length -- breaking every PDF operation. The fix was to import
+    ``pymupdf`` directly (0.6.7); this test is what keeps it fixed, for any
+    future dependency that decides to greet the world on fd 1.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", "import lexcloak_pdf_tool, lexcloak_pdf_tool.__main__"],
+        capture_output=True, timeout=60,
+    )
+    assert proc.returncode == 0, (
+        f"import failed: {proc.stderr.decode('utf-8', errors='replace')!r}"
+    )
+    assert proc.stdout == b"", (
+        "import-time write to stdout — this corrupts the frame channel "
+        f"before any handler runs. Leaked: {proc.stdout[:200]!r}"
+    )
+
+
+def test_package_does_not_import_the_deprecated_fitz_alias():
+    """Static guard: no module may reach PyMuPDF through ``fitz``.
+
+    ``import fitz`` is the specific import-time stdout writer that broke
+    the transport (see the test above), and PyMuPDF states the alias
+    "will be removed in future" — at which point it is an ImportError at
+    spawn. Both names are the same module, so ``pymupdf`` costs nothing.
+    """
+    pkg_dir = pathlib.Path(__file__).resolve().parent.parent / "lexcloak_pdf_tool"
+    offenders = [
+        f"{path.name}:{lineno}"
+        for path in sorted(pkg_dir.glob("*.py"))
+        for lineno, line in enumerate(path.read_text().splitlines(), 1)
+        if re.match(r"\s*(import\s+fitz|from\s+fitz\s+import)\b", line)
+    ]
+    assert not offenders, f"deprecated `fitz` import(s): {offenders}"
 
 
 def test_extract_native_roundtrip():
@@ -302,14 +352,14 @@ def test_apply_redactions_roundtrip_with_match():
         resp = s.call("apply_redactions", pdf_b64=_b64(pdf),
                       matches=matches, redact_label="")
     out = base64.b64decode(resp["result"]["pdf_b64"])
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     redacted_text = out_doc[0].get_text()
     out_doc.close()
     assert "123-45-6789" not in redacted_text
 
 
 def test_strip_metadata_roundtrip():
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({"author": "Dr. Jane Doe"})
     doc.new_page(width=612, height=792)
     pdf = doc.tobytes()
@@ -317,7 +367,7 @@ def test_strip_metadata_roundtrip():
     with CLISession() as s:
         resp = s.call("strip_metadata", pdf_b64=_b64(pdf))
     out = base64.b64decode(resp["result"]["pdf_b64"])
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     meta = out_doc.metadata or {}
     out_doc.close()
     assert (meta.get("author") or "") == ""
@@ -335,7 +385,7 @@ def test_set_metadata_roundtrip_spec_13_fields():
         resp = s.call("set_metadata", pdf_b64=_b64(pdf), fields=fields)
     assert resp["ok"] is True
     out = base64.b64decode(resp["result"]["pdf_b64"])
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     meta = out_doc.metadata or {}
     out_doc.close()
     assert meta["subject"] == fields["subject"]
@@ -371,7 +421,7 @@ def test_set_metadata_empty_fields_returns_valid_pdf():
         resp = s.call("set_metadata", pdf_b64=_b64(pdf), fields={})
     assert resp["ok"] is True
     out = base64.b64decode(resp["result"]["pdf_b64"])
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     assert len(out_doc) == 1  # page count preserved
     out_doc.close()
 
@@ -393,7 +443,7 @@ def test_insert_cover_page_roundtrip_adds_page():
                       context=_cover_context(p=3))
     assert resp["ok"] is True
     out = base64.b64decode(resp["result"]["pdf_b64"])
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert len(out_doc) == 4
         # The verbatim title (em-dash) must be searchable on page 0
@@ -672,16 +722,16 @@ def test_extract_text_dict_roundtrip():
 
 def test_extract_text_dict_strips_image_binary():
     """``type=1`` (image) blocks have their ``image`` bytes stripped."""
-    src = fitz.open()
+    src = pymupdf.open()
     src_page = src.new_page(width=50, height=50)
-    src_page.draw_rect(fitz.Rect(0, 0, 50, 50),
+    src_page.draw_rect(pymupdf.Rect(0, 0, 50, 50),
                        color=(0, 0, 0), fill=(0, 0, 0))
     png = src_page.get_pixmap().tobytes("png")
     src.close()
 
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_image(fitz.Rect(50, 50, 150, 150), stream=png)
+    page.insert_image(pymupdf.Rect(50, 50, 150, 150), stream=png)
     pdf_bytes = doc.tobytes()
     doc.close()
     with CLISession() as s:
@@ -727,7 +777,7 @@ def test_extract_text_plain_invalid_page_returns_structured_error():
 
 def test_get_metadata_roundtrip_with_fields():
     """Nested ``{metadata, has_xmp}`` shape."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({
         "author": "Dr. Jane Doe",
         "title": "Test Document",
@@ -760,11 +810,11 @@ def test_get_metadata_roundtrip_plain_pdf_no_xmp():
 
 def _make_encrypted_pdf(password: str = "secret",
                         text: str = "Confidential content") -> bytes:
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_text(fitz.Point(50, 100), text, fontsize=12)
+    page.insert_text(pymupdf.Point(50, 100), text, fontsize=12)
     pdf = doc.tobytes(
-        encryption=fitz.PDF_ENCRYPT_AES_256,
+        encryption=pymupdf.PDF_ENCRYPT_AES_256,
         user_pw=password,
         owner_pw=password,
     )
@@ -781,7 +831,7 @@ def test_decrypt_roundtrip_correct_password():
     out = base64.b64decode(resp["result"]["pdf_b64"])
     assert out[:4] == b"%PDF"
     assert resp["result"]["page_count"] == 1
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     assert not out_doc.is_encrypted or not out_doc.needs_pass
     text = out_doc[0].get_text()
     out_doc.close()
@@ -839,7 +889,7 @@ def test_encrypt_roundtrip_stateless():
     assert resp["ok"] is True
     assert resp["result"]["protection_applied"] is True
     out = base64.b64decode(resp["result"]["pdf_b64"])
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     assert out_doc.is_encrypted
     assert out_doc.authenticate("pw-123") > 0
     out_doc.close()
@@ -853,7 +903,7 @@ def test_encrypt_empty_password_noop_returns_cleartext():
     assert resp["ok"] is True
     assert resp["result"]["protection_applied"] is False
     out = base64.b64decode(resp["result"]["pdf_b64"])
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     assert not (out_doc.is_encrypted and out_doc.needs_pass)
     out_doc.close()
 
@@ -894,9 +944,9 @@ def test_encrypt_two_calls_same_session_serialize():
         first = s.call("encrypt", pdf_b64=_b64(pdf), password="pw-a")
         second = s.call("encrypt", pdf_b64=_b64(pdf), password="pw-b")
     assert first["ok"] is True and second["ok"] is True
-    d1 = fitz.open(stream=base64.b64decode(first["result"]["pdf_b64"]),
+    d1 = pymupdf.open(stream=base64.b64decode(first["result"]["pdf_b64"]),
                    filetype="pdf")
-    d2 = fitz.open(stream=base64.b64decode(second["result"]["pdf_b64"]),
+    d2 = pymupdf.open(stream=base64.b64decode(second["result"]["pdf_b64"]),
                    filetype="pdf")
     assert d1.authenticate("pw-a") > 0 and d2.authenticate("pw-b") > 0
     d1.close()
@@ -915,7 +965,7 @@ def test_encrypt_handle_roundtrip_leaves_cached_doc_cleartext():
         followup = s.call("page_count_h", handle=handle)
     assert resp["ok"] is True
     assert resp["result"]["protection_applied"] is True
-    out_doc = fitz.open(stream=base64.b64decode(resp["result"]["pdf_b64"]),
+    out_doc = pymupdf.open(stream=base64.b64decode(resp["result"]["pdf_b64"]),
                         filetype="pdf")
     assert out_doc.authenticate("pw-h") > 0
     out_doc.close()
@@ -1164,7 +1214,7 @@ def test_is_encrypted_h_returns_false_on_plaintext():
 def test_is_encrypted_h_returns_true_on_real_password_pdf():
     """Opening a password-protected PDF should still produce a handle.
 
-    PyMuPDF's ``fitz.open`` accepts encrypted docs without authenticating;
+    PyMuPDF's ``pymupdf.open`` accepts encrypted docs without authenticating;
     operations on the doc fail until ``authenticate(password)`` runs. The
     handle protocol surfaces this state via ``is_encrypted_h`` so the
     closed app can prompt for password before attempting per-page reads.
@@ -1197,7 +1247,7 @@ def test_apply_redactions_h_produces_redacted_output():
     assert resp["result"]["protection_applied"] is True
     out_bytes = base64.b64decode(resp["result"]["pdf_b64"])
     # Re-open the redacted PDF and verify the SSN text is gone from page 0
-    out_doc = fitz.open(stream=out_bytes, filetype="pdf")
+    out_doc = pymupdf.open(stream=out_bytes, filetype="pdf")
     try:
         page_text = out_doc[0].get_text()
         assert "123-45-6789" not in page_text
@@ -1214,7 +1264,7 @@ def test_strip_metadata_h_produces_bytes():
     out_b64 = resp["result"]["pdf_b64"]
     out_bytes = base64.b64decode(out_b64)
     # Re-open the stripped PDF and verify metadata is empty
-    out_doc = fitz.open(stream=out_bytes, filetype="pdf")
+    out_doc = pymupdf.open(stream=out_bytes, filetype="pdf")
     try:
         meta = out_doc.metadata or {}
         # Default fields stripped to empty strings; PyMuPDF may add format/encryption
@@ -1237,9 +1287,9 @@ def test_set_metadata_h_matches_stateless():
     # Compare by re-opening both and reading metadata back -- byte
     # equality is not guaranteed (PyMuPDF embeds timestamps + producer
     # autogen during save), but the metadata fields should match.
-    sl_doc = fitz.open(stream=base64.b64decode(stateless["result"]["pdf_b64"]),
+    sl_doc = pymupdf.open(stream=base64.b64decode(stateless["result"]["pdf_b64"]),
                        filetype="pdf")
-    h_doc = fitz.open(stream=base64.b64decode(handle_resp["result"]["pdf_b64"]),
+    h_doc = pymupdf.open(stream=base64.b64decode(handle_resp["result"]["pdf_b64"]),
                       filetype="pdf")
     try:
         sl_meta = sl_doc.metadata or {}
@@ -1288,7 +1338,7 @@ def test_insert_cover_page_h_matches_stateless():
                              context=ctx)
     assert stateless["ok"] is True and handle_resp["ok"] is True
     for resp in (stateless, handle_resp):
-        out_doc = fitz.open(
+        out_doc = pymupdf.open(
             stream=base64.b64decode(resp["result"]["pdf_b64"]),
             filetype="pdf")
         try:
@@ -1396,10 +1446,10 @@ _SPEC_13 = "Auto-redacted by Lex Cloak. Review before distribution."
 def _make_stamped_pdf(**meta) -> bytes:
     """Text PDF with caller-applied metadata, big enough that the no-grow
     guard cannot short-circuit the scrub and preserve the stamp trivially."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
     for i in range(40):
-        page.insert_text(fitz.Point(50, 80 + i * 16),
+        page.insert_text(pymupdf.Point(50, 80 + i * 16),
                          "Reference 553-01-8842 filed 2026-03-04.", fontsize=11)
     doc.set_metadata(meta)
     out = doc.tobytes(garbage=0, deflate=False)
@@ -1408,7 +1458,7 @@ def _make_stamped_pdf(**meta) -> bytes:
 
 
 def _subject_of(pdf_b64: str) -> str:
-    doc = fitz.open(stream=base64.b64decode(pdf_b64), filetype="pdf")
+    doc = pymupdf.open(stream=base64.b64decode(pdf_b64), filetype="pdf")
     try:
         return doc.metadata.get("subject") or ""
     finally:
@@ -1486,7 +1536,7 @@ def test_reduce_size_wire_preserves_all_three_spec_13_fields(op):
         else:
             resp = s.call(op, pdf_b64=_b64(src), preserve_metadata=keys)
     assert resp["ok"] is True, resp
-    doc = fitz.open(stream=base64.b64decode(resp["result"]["pdf_b64"]),
+    doc = pymupdf.open(stream=base64.b64decode(resp["result"]["pdf_b64"]),
                     filetype="pdf")
     try:
         meta = dict(doc.metadata)

@@ -17,7 +17,7 @@ deserialize round-trips. The 6-criteria framework:
 """
 from __future__ import annotations
 
-import fitz
+import pymupdf
 import pytest
 
 from lexcloak_pdf_tool import (
@@ -56,10 +56,10 @@ def _make_pdf(text: str = "Patient SSN 123-45-6789",
               x: float = 50, y: float = 100,
               fontsize: float = 12, n_pages: int = 1) -> bytes:
     """Build an n-page PDF with text on each page."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     for _ in range(n_pages):
         page = doc.new_page(width=612, height=792)
-        page.insert_text(fitz.Point(x, y), text, fontsize=fontsize)
+        page.insert_text(pymupdf.Point(x, y), text, fontsize=fontsize)
     pdf_bytes = doc.tobytes()
     doc.close()
     return pdf_bytes
@@ -67,11 +67,11 @@ def _make_pdf(text: str = "Patient SSN 123-45-6789",
 
 def _make_encrypted_pdf(password: str) -> bytes:
     """Build a single-page password-protected PDF."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792).insert_text(
-        fitz.Point(50, 100), "Confidential", fontsize=12)
+        pymupdf.Point(50, 100), "Confidential", fontsize=12)
     out = doc.tobytes(
-        encryption=fitz.PDF_ENCRYPT_AES_256,
+        encryption=pymupdf.PDF_ENCRYPT_AES_256,
         user_pw=password,
         owner_pw=password,
     )
@@ -137,7 +137,7 @@ def test_all_page_sizes_multi_page_uniform_dims():
 
 def test_all_page_sizes_mixed_dimensions():
     """Pages with different dimensions surface accurately."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792)   # US Letter
     doc.new_page(width=595, height=842)   # A4
     doc.new_page(width=792, height=612)   # Letter landscape
@@ -171,9 +171,9 @@ def test_all_page_sizes_corrupt_pdf_raises():
 def test_all_page_sizes_empty_pw_encrypted_pdf_passthrough():
     """PyMuPDF auto-authenticates empty-password PDFs, so all_page_sizes
     succeeds with the same dims a plaintext doc would return."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792)
-    pdf = doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw="", user_pw="")
+    pdf = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="", user_pw="")
     doc.close()
     sizes = all_page_sizes(pdf)
     assert len(sizes) == 1
@@ -206,13 +206,13 @@ def test_encrypt_valid_password_round_trips():
     assert applied is True
     assert out[:4] == b"%PDF"
     # Right password unlocks.
-    d = fitz.open(stream=out, filetype="pdf")
+    d = pymupdf.open(stream=out, filetype="pdf")
     assert d.is_encrypted
     assert d.authenticate("pw-123") > 0
     assert "123-45-6789" in d[0].get_text()
     d.close()
     # Wrong password fails on a fresh open (authenticate is one-shot).
-    d2 = fitz.open(stream=out, filetype="pdf")
+    d2 = pymupdf.open(stream=out, filetype="pdf")
     assert d2.authenticate("WRONG") == 0
     d2.close()
 
@@ -232,7 +232,7 @@ def test_encrypt_non_ascii_password_round_trips():
     pw = "clé-secrète-Ünïcödé-🔒"
     out, applied = encrypt(clear, pw)
     assert applied is True
-    d = fitz.open(stream=out, filetype="pdf")
+    d = pymupdf.open(stream=out, filetype="pdf")
     assert d.authenticate(pw) > 0
     d.close()
 
@@ -242,7 +242,7 @@ def test_encrypt_large_multipage_pdf_round_trips():
     clear = _make_pdf("Page body text", n_pages=50)
     out, applied = encrypt(clear, "big-doc-pw")
     assert applied is True
-    d = fitz.open(stream=out, filetype="pdf")
+    d = pymupdf.open(stream=out, filetype="pdf")
     assert d.authenticate("big-doc-pw") > 0
     assert d.page_count == 50
     d.close()
@@ -254,7 +254,7 @@ def test_encrypt_save_failure_falls_back_to_unprotected(monkeypatch):
     encryption must never block the download. The fallback clean-save
     still succeeds, so content survives."""
     clear = _make_pdf("Fallback body")
-    real_save = fitz.Document.save
+    real_save = pymupdf.Document.save
 
     def flaky_save(self, *args, **kwargs):
         # Only the encrypted save (carries an ``encryption`` kwarg) fails;
@@ -263,10 +263,10 @@ def test_encrypt_save_failure_falls_back_to_unprotected(monkeypatch):
             raise RuntimeError("simulated encrypted-save failure")
         return real_save(self, *args, **kwargs)
 
-    monkeypatch.setattr(fitz.Document, "save", flaky_save)
+    monkeypatch.setattr(pymupdf.Document, "save", flaky_save)
     out, applied = encrypt(clear, "pw-that-cannot-apply")
     assert applied is False
-    d = fitz.open(stream=out, filetype="pdf")
+    d = pymupdf.open(stream=out, filetype="pdf")
     assert not (d.is_encrypted and d.needs_pass)  # unprotected fallback
     assert "Fallback body" in d[0].get_text()
     d.close()
@@ -336,7 +336,7 @@ def test_extract_text_native_word_shape():
 
 
 def test_extract_text_native_empty_page_returns_empty():
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792)
     pdf = doc.tobytes()
     doc.close()
@@ -390,7 +390,7 @@ def test_apply_redactions_actually_redacts():
         "enabled": True, "text": "123-45-6789",
     }]
     out, _ = apply_redactions(pdf, matches)
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     redacted_text = out_doc[0].get_text()
     out_doc.close()
     assert "123-45-6789" not in redacted_text
@@ -453,7 +453,7 @@ def test_apply_redactions_tolerates_unknown_per_match_keys():
         "some_future_field": {"nested": True},
     }]
     out, _ = apply_redactions(pdf, matches, redact_label="REDACTED")
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         text = out_doc[0].get_text()
     finally:
@@ -482,10 +482,10 @@ def _is_dark_at(pdf_bytes: bytes, page: int, x_pt: float, y_pt: float,
     Renders the page as displayed (get_pixmap honors /Rotate), so the point
     coordinates are in the same as-rendered frame the app supplies rects in.
     """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         zoom = dpi / 72.0
-        pix = doc[page].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        pix = doc[page].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
         r, g, b = pix.pixel(int(x_pt * zoom), int(y_pt * zoom))[:3]
         return r < 40 and g < 40 and b < 40
     finally:
@@ -498,7 +498,7 @@ def test_apply_redactions_rotated_page_lands_in_as_rendered_space(rotation):
     the export for every /Rotate value. The supplied center (150, 120) must
     render black; pre-fix it stayed white because the box was displaced into
     unrotated space."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
     if rotation:
         page.set_rotation(rotation)
@@ -543,7 +543,7 @@ def _ssn_match(extra: dict | None = None) -> dict:
 
 
 def _read_page_text(pdf_bytes: bytes, page: int = 0) -> str:
-    out_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    out_doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         return out_doc[page].get_text()
     finally:
@@ -698,9 +698,9 @@ def test_apply_redactions_blackout_all_pages_allowed():
 def test_apply_redactions_blackout_rotated_page(rotation):
     """Blackout covers the whole page for every /Rotate value — center and all
     four corners render black in as-displayed space, and text is scrubbed."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_text(fitz.Point(50, 100), "Patient SSN 123-45-6789", fontsize=12)
+    page.insert_text(pymupdf.Point(50, 100), "Patient SSN 123-45-6789", fontsize=12)
     if rotation:
         page.set_rotation(rotation)
     pdf = doc.tobytes()
@@ -736,14 +736,14 @@ def test_apply_redactions_blackout_out_of_range_ignored():
 
 
 def test_strip_metadata_bytes_form_strips_author():
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({"author": "Dr. Jane Doe", "title": "Confidential"})
     doc.new_page(width=612, height=792)
     pdf = doc.tobytes()
     doc.close()
 
     out = strip_metadata(pdf)
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     meta = out_doc.metadata or {}
     out_doc.close()
     assert (meta.get("author") or "") == ""
@@ -752,7 +752,7 @@ def test_strip_metadata_bytes_form_strips_author():
 
 def test_strip_metadata_doc_form_returns_none_and_mutates():
     """Live ``Document`` form preserves the legacy in-place semantics."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({"author": "Dr. Jane Doe"})
     doc.new_page()
     result = strip_metadata(doc)
@@ -774,7 +774,7 @@ def test_set_metadata_round_trip_subject_producer_keywords():
     }
     out = set_metadata(pdf, fields)
 
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     meta = out_doc.metadata or {}
     out_doc.close()
     assert meta["subject"] == fields["subject"]
@@ -784,14 +784,14 @@ def test_set_metadata_round_trip_subject_producer_keywords():
 
 def test_set_metadata_preserves_existing_fields_not_in_payload():
     """Merge semantics: fields not in ``payload`` survive untouched."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({"author": "Original Author", "title": "Original Title"})
     doc.new_page()
     pdf = doc.tobytes()
     doc.close()
 
     out = set_metadata(pdf, {"subject": "added subject"})
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     meta = out_doc.metadata or {}
     out_doc.close()
     assert meta["author"] == "Original Author"
@@ -801,14 +801,14 @@ def test_set_metadata_preserves_existing_fields_not_in_payload():
 
 def test_set_metadata_empty_dict_is_noop():
     """Empty fields round-trips the PDF without metadata changes."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({"author": "A", "title": "T"})
     doc.new_page()
     pdf = doc.tobytes()
     doc.close()
 
     out = set_metadata(pdf, {})
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     meta = out_doc.metadata or {}
     out_doc.close()
     assert meta["author"] == "A"
@@ -833,7 +833,7 @@ def test_set_metadata_unicode_keywords_round_trip():
     """Non-ASCII keywords (e.g., accented language codes) survive."""
     pdf = _make_pdf()
     out = set_metadata(pdf, {"keywords": "auto-redactée, revue-requise"})
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     meta = out_doc.metadata or {}
     out_doc.close()
     assert meta["keywords"] == "auto-redactée, revue-requise"
@@ -844,7 +844,7 @@ def test_set_metadata_long_value_round_trip():
     pdf = _make_pdf()
     long_value = "Lex Cloak " + ("x" * 4096)
     out = set_metadata(pdf, {"producer": long_value})
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     meta = out_doc.metadata or {}
     out_doc.close()
     assert meta["producer"] == long_value
@@ -852,7 +852,7 @@ def test_set_metadata_long_value_round_trip():
 
 def test_set_metadata_doc_form_mutates_in_place():
     """``_set_metadata_doc`` mutates the live Document, returns None."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({"author": "A"})
     doc.new_page()
     result = _set_metadata_doc(doc, {"subject": "S"})
@@ -865,7 +865,7 @@ def test_set_metadata_doc_form_mutates_in_place():
 
 def test_set_metadata_doc_form_empty_dict_is_noop():
     """No-op short-circuits before PyMuPDF call (no metadata mutation)."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.set_metadata({"author": "A"})
     doc.new_page()
     _set_metadata_doc(doc, {})
@@ -879,7 +879,7 @@ def test_set_metadata_allowed_keys_matches_pymupdf_contract():
     Regression guard: if PyMuPDF drops a key we list, our pre-check would
     pass an unsupported field through and surface a deeper error.
     """
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page()
     # PyMuPDF accepts the entire allowed-set; verify by setting all at once.
     valid_payload = {k: "" for k in _ALLOWED_METADATA_KEYS}
@@ -900,12 +900,12 @@ def test_set_metadata_redacted_pdf_then_strip_round_trip():
         "keywords": "auto-redacted, review-required",
     })
     # Verify they landed
-    doc = fitz.open(stream=intermediate, filetype="pdf")
+    doc = pymupdf.open(stream=intermediate, filetype="pdf")
     assert (doc.metadata or {})["subject"].startswith("Auto-redacted")
     doc.close()
     # Then strip should wipe them
     stripped = strip_metadata(intermediate)
-    doc = fitz.open(stream=stripped, filetype="pdf")
+    doc = pymupdf.open(stream=stripped, filetype="pdf")
     meta = doc.metadata or {}
     doc.close()
     assert (meta.get("subject") or "") == ""
@@ -926,16 +926,16 @@ def _default_context(date="2026-05-17", n=12, p=5, version="1.7.8") -> dict:
 
 def test_insert_cover_page_adds_one_page_at_index_zero():
     """Page count grows by 1; original page-0 content shifts to page 1."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792).insert_text(
-        fitz.Point(50, 100), "ORIGINAL_PAGE_ONE_MARKER", fontsize=12)
+        pymupdf.Point(50, 100), "ORIGINAL_PAGE_ONE_MARKER", fontsize=12)
     doc.new_page(width=612, height=792).insert_text(
-        fitz.Point(50, 100), "ORIGINAL_PAGE_TWO_MARKER", fontsize=12)
+        pymupdf.Point(50, 100), "ORIGINAL_PAGE_TWO_MARKER", fontsize=12)
     pdf = doc.tobytes()
     doc.close()
 
     out = insert_cover_page(pdf, _default_context(p=2))
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert len(out_doc) == 3
         assert "ORIGINAL_PAGE_ONE_MARKER" in out_doc[1].get_text()
@@ -954,7 +954,7 @@ def test_insert_cover_page_renders_title_and_footer_with_em_dash():
     """
     pdf = _make_pdf()
     out = insert_cover_page(pdf, _default_context())
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         cover = out_doc[0]
         # Title (em-dash is U+2014, must be preserved verbatim)
@@ -973,7 +973,7 @@ def test_insert_cover_page_renders_template_substitutions():
     """Date / N / P substitute into the body sentence."""
     pdf = _make_pdf()
     out = insert_cover_page(pdf, _default_context(date="2026-05-17", n=42, p=7))
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         cover = out_doc[0]
         assert cover.search_for("2026-05-17"), "date not rendered"
@@ -988,7 +988,7 @@ def test_insert_cover_page_renders_body_anchor_phrase():
     """Body text includes the recipient-review-required clause verbatim."""
     pdf = _make_pdf()
     out = insert_cover_page(pdf, _default_context())
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         cover = out_doc[0]
         # No ligatures in this phrase; safe for direct text-extraction check.
@@ -1002,13 +1002,13 @@ def test_insert_cover_page_renders_body_anchor_phrase():
 def test_insert_cover_page_matches_a4_page_size():
     """A4 input -> A4 cover. Otherwise the cover looks wrong in viewers."""
     a4_width, a4_height = 595.0, 842.0
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=a4_width, height=a4_height)
     pdf = doc.tobytes()
     doc.close()
 
     out = insert_cover_page(pdf, _default_context(p=1))
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         cover_rect = out_doc[0].rect
         assert float(cover_rect.width) == pytest.approx(a4_width)
@@ -1021,7 +1021,7 @@ def test_insert_cover_page_large_redaction_count_renders_cleanly():
     """4-digit counts don't break the layout (boundary stress)."""
     pdf = _make_pdf()
     out = insert_cover_page(pdf, _default_context(n=9999, p=500))
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         cover = out_doc[0]
         assert cover.search_for("9999 items")
@@ -1034,7 +1034,7 @@ def test_insert_cover_page_zero_redaction_count_still_renders():
     """N=0 ships verbatim per the no-pluralization rule."""
     pdf = _make_pdf()
     out = insert_cover_page(pdf, _default_context(n=0, p=1))
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert out_doc[0].search_for("0 items")
     finally:
@@ -1067,7 +1067,7 @@ def test_insert_cover_page_product_version_optional():
     pdf = _make_pdf()
     ctx = {"date": "2026-05-17", "redacted_count": 1, "page_count": 1}
     out = insert_cover_page(pdf, ctx)
-    out_doc = fitz.open(stream=out, filetype="pdf")
+    out_doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert len(out_doc) == 2
     finally:
@@ -1075,7 +1075,7 @@ def test_insert_cover_page_product_version_optional():
 
 
 def test_insert_cover_page_doc_form_mutates_in_place():
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792)
     pre_len = len(doc)
     _insert_cover_page_doc(doc, _default_context(p=1))
