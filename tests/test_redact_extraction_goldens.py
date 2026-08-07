@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 
-import fitz
+import pymupdf
 import pytest
 
 from lexcloak_pdf_tool.redact import (
@@ -53,17 +53,17 @@ def _text_page_pdf(page_rotate: int, text_rotate: int = 0) -> bytes:
     (the real-world landscape composition: content drawn sideways, ``/Rotate``
     uprights it for display).
     """
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=PORTRAIT_W, height=PORTRAIT_H)
     if text_rotate == 0:
-        page.insert_text(fitz.Point(40, 270), f"Taxpayer SSN: {SSN}",
+        page.insert_text(pymupdf.Point(40, 270), f"Taxpayer SSN: {SSN}",
                          fontsize=13)
-        page.insert_text(fitz.Point(40, 700), CONTROL, fontsize=13)
+        page.insert_text(pymupdf.Point(40, 700), CONTROL, fontsize=13)
     elif text_rotate == 90:
         # reads bottom-to-top; SSN value lands at native (286..304, 528..602)
-        page.insert_text(fitz.Point(300, 752), f"Taxpayer SSN: {SSN}",
+        page.insert_text(pymupdf.Point(300, 752), f"Taxpayer SSN: {SSN}",
                          fontsize=13, rotate=90)
-        page.insert_text(fitz.Point(500, 752), CONTROL, fontsize=13,
+        page.insert_text(pymupdf.Point(500, 752), CONTROL, fontsize=13,
                          rotate=90)
     else:  # pragma: no cover - guard against bad parametrize edits
         raise ValueError(f"unsupported text_rotate {text_rotate}")
@@ -77,14 +77,14 @@ def _text_page_pdf(page_rotate: int, text_rotate: int = 0) -> bytes:
 def _image_page_pdf(page_rotate: int) -> bytes:
     """Portrait page with a 200x200 checkerboard placed at native
     (100, 100, 400, 400); page flagged ``/Rotate page_rotate``."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=PORTRAIT_W, height=PORTRAIT_H)
-    pm = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 200))
+    pm = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 200))
     for y in range(200):
         for x in range(200):
             v = 255 if (x // 25 + y // 25) % 2 == 0 else 30
             pm.set_pixel(x, y, (v, v, v))
-    page.insert_image(fitz.Rect(100, 100, 400, 400), pixmap=pm)
+    page.insert_image(pymupdf.Rect(100, 100, 400, 400), pixmap=pm)
     if page_rotate:
         page.set_rotation(page_rotate)
     out = doc.tobytes()
@@ -98,11 +98,11 @@ def _edge_header_pdf(page_rotate: int = 0) -> bytes:
     -2.5, fontsize 14 -> word boxes y in [-17.6, +1.7]), plus an in-page
     body line. Pre-fix, a full-page blackout left ``ppy ggy pyg y ( )``
     extractable on both pymupdf lines."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=PORTRAIT_W, height=PORTRAIT_H)
-    page.insert_text(fitz.Point(60, -2.5), "happy doggy pygmy (label)",
+    page.insert_text(pymupdf.Point(60, -2.5), "happy doggy pygmy (label)",
                      fontsize=14)
-    page.insert_text(fitz.Point(60, 400), f"BODY {CONTROL}", fontsize=13)
+    page.insert_text(pymupdf.Point(60, 400), f"BODY {CONTROL}", fontsize=13)
     if page_rotate:
         page.set_rotation(page_rotate)
     out = doc.tobytes()
@@ -154,7 +154,7 @@ IMAGE_BURN_RECT = {
 
 
 def _page_text(pdf_bytes: bytes, page: int = 0) -> str:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         return doc[page].get_text()
     finally:
@@ -164,9 +164,9 @@ def _page_text(pdf_bytes: bytes, page: int = 0) -> str:
 def _pixel_dark(pdf_bytes: bytes, page: int, x_pt: float, y_pt: float) -> bool:
     """Near-black check at an as-displayed point (get_pixmap honors /Rotate;
     72 dpi -> 1pt == 1px)."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
-        pix = doc[page].get_pixmap(matrix=fitz.Matrix(1, 1))
+        pix = doc[page].get_pixmap(matrix=pymupdf.Matrix(1, 1))
         r, g, b = pix.pixel(int(x_pt), int(y_pt))[:3]
         return r < 40 and g < 40 and b < 40
     finally:
@@ -416,14 +416,14 @@ def test_image_region_destroyed_not_overdrawn(page_rotate):
     out, _ = apply_redactions(
         pdf, [_match(IMAGE_BURN_RECT[page_rotate], mtype="Manual Region")])
 
-    doc = fitz.open(stream=out, filetype="pdf")
+    doc = pymupdf.open(stream=out, filetype="pdf")
     try:
         page = doc[0]
         imgs = page.get_images(full=True)
         assert len(imgs) == 1, "embedded image count changed"
-        pm = fitz.Pixmap(doc, imgs[0][0])
+        pm = pymupdf.Pixmap(doc, imgs[0][0])
         if pm.colorspace and pm.colorspace.n > 3:
-            pm = fitz.Pixmap(fitz.csRGB, pm)
+            pm = pymupdf.Pixmap(pymupdf.csRGB, pm)
         w, h = pm.width, pm.height
 
         # Center block (the burned native center quarter maps to the image
@@ -481,11 +481,11 @@ def test_blackout_scrubs_edge_hanging_glyphs(page_rotate):
 
 def test_blackout_overscan_stays_on_its_page():
     """The inflated blackout region must not scrub the neighbouring page."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     p0 = doc.new_page(width=PORTRAIT_W, height=PORTRAIT_H)
-    p0.insert_text(fitz.Point(60, 400), f"PAGE0 {SSN}", fontsize=13)
+    p0.insert_text(pymupdf.Point(60, 400), f"PAGE0 {SSN}", fontsize=13)
     p1 = doc.new_page(width=PORTRAIT_W, height=PORTRAIT_H)
-    p1.insert_text(fitz.Point(60, 400), f"PAGE1 {CONTROL}", fontsize=13)
+    p1.insert_text(pymupdf.Point(60, 400), f"PAGE1 {CONTROL}", fontsize=13)
     pdf = doc.tobytes()
     doc.close()
 
@@ -526,14 +526,14 @@ def test_match_rect_interior_does_not_overscan():
 class TestEdgeOverscanStrips:
     """Unit contract of the strip builder (pure geometry)."""
 
-    PAGE = fitz.Rect(0, 0, 612, 792)
+    PAGE = pymupdf.Rect(0, 0, 612, 792)
 
     def test_interior_rect_yields_no_strips(self):
         assert _edge_overscan_strips(
-            fitz.Rect(50, 50, 200, 80), self.PAGE) == []
+            pymupdf.Rect(50, 50, 200, 80), self.PAGE) == []
 
     def test_flush_top_yields_one_upward_strip(self):
-        strips = _edge_overscan_strips(fitz.Rect(50, 0, 200, 30), self.PAGE)
+        strips = _edge_overscan_strips(pymupdf.Rect(50, 0, 200, 30), self.PAGE)
         assert len(strips) == 1
         s = strips[0]
         assert (s.x0, s.x1) == (50, 200)
@@ -543,15 +543,15 @@ class TestEdgeOverscanStrips:
     def test_epsilon_boundary_is_inclusive(self):
         # y0 exactly at epsilon (1.0) still counts as flush…
         assert len(_edge_overscan_strips(
-            fitz.Rect(50, 1.0, 200, 30), self.PAGE)) == 1
+            pymupdf.Rect(50, 1.0, 200, 30), self.PAGE)) == 1
         # …just past it does not.
         assert _edge_overscan_strips(
-            fitz.Rect(50, 1.01, 200, 30), self.PAGE) == []
+            pymupdf.Rect(50, 1.01, 200, 30), self.PAGE) == []
 
     def test_corner_rect_yields_two_strips(self):
-        strips = _edge_overscan_strips(fitz.Rect(0, 0, 100, 100), self.PAGE)
+        strips = _edge_overscan_strips(pymupdf.Rect(0, 0, 100, 100), self.PAGE)
         assert len(strips) == 2  # top + left
 
     def test_full_page_rect_yields_all_four(self):
-        strips = _edge_overscan_strips(fitz.Rect(self.PAGE), self.PAGE)
+        strips = _edge_overscan_strips(pymupdf.Rect(self.PAGE), self.PAGE)
         assert len(strips) == 4

@@ -26,7 +26,7 @@ from __future__ import annotations
 import base64
 import os
 
-import fitz
+import pymupdf
 import pytest
 
 from lexcloak_pdf_tool import reduce_size
@@ -39,12 +39,12 @@ from lexcloak_pdf_tool.reduce_size import _validate_reduce_params
 def _make_text_pdf(text: str = "Patient SSN 123-45-6789",
                    n_pages: int = 1, ocr_token: str | None = None) -> bytes:
     """Born-digital text PDF; optional invisible (render-mode-3) OCR layer."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     for _ in range(n_pages):
         page = doc.new_page(width=612, height=792)
-        page.insert_text(fitz.Point(50, 100), text, fontsize=12)
+        page.insert_text(pymupdf.Point(50, 100), text, fontsize=12)
         if ocr_token is not None:
-            page.insert_text(fitz.Point(50, 140), ocr_token,
+            page.insert_text(pymupdf.Point(50, 140), ocr_token,
                              fontsize=12, render_mode=3)
     out = doc.tobytes()
     doc.close()
@@ -57,28 +57,28 @@ def _make_image_pdf(px: int = 1500, rect_pt: float = 200.0) -> bytes:
     px=1500 in a 200pt (≈2.78in) box is ≈540 DPI -- well above any preset,
     so ``rewrite_images`` always has something to downsample.
     """
-    pm = fitz.Pixmap(fitz.csRGB, px, px, os.urandom(px * px * 3), False)
-    doc = fitz.open()
+    pm = pymupdf.Pixmap(pymupdf.csRGB, px, px, os.urandom(px * px * 3), False)
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_image(fitz.Rect(50, 50, 50 + rect_pt, 50 + rect_pt), pixmap=pm)
+    page.insert_image(pymupdf.Rect(50, 50, 50 + rect_pt, 50 + rect_pt), pixmap=pm)
     out = doc.tobytes(garbage=4, deflate=True)
     doc.close()
     return out
 
 
 def _make_encrypted_pdf(password: str = "pw") -> bytes:
-    doc = fitz.open()
+    doc = pymupdf.open()
     doc.new_page(width=612, height=792).insert_text(
-        fitz.Point(50, 100), "Confidential", fontsize=12)
-    out = doc.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256,
+        pymupdf.Point(50, 100), "Confidential", fontsize=12)
+    out = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256,
                       user_pw=password, owner_pw=password)
     doc.close()
     return out
 
 
-def _open_clean(pdf_bytes: bytes) -> fitz.Document:
+def _open_clean(pdf_bytes: bytes) -> pymupdf.Document:
     """Open output bytes, asserting they parse as a valid PDF."""
-    return fitz.open(stream=pdf_bytes, filetype="pdf")
+    return pymupdf.open(stream=pdf_bytes, filetype="pdf")
 
 
 # ── Happy path ───────────────────────────────────────────────────────
@@ -193,10 +193,10 @@ def _make_stamped_pdf(**meta) -> bytes:
     """Text PDF carrying caller-applied metadata, sized so the no-grow guard
     does not short-circuit the scrub (a returned original would preserve the
     stamp trivially and prove nothing)."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
     for i in range(40):
-        page.insert_text(fitz.Point(50, 80 + i * 16),
+        page.insert_text(pymupdf.Point(50, 80 + i * 16),
                          "Reference 553-01-8842 filed 2026-03-04.", fontsize=11)
     doc.set_metadata(meta)
     out = doc.tobytes(garbage=0, deflate=False)
@@ -205,7 +205,7 @@ def _make_stamped_pdf(**meta) -> bytes:
 
 
 def _meta(pdf_bytes: bytes) -> dict:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
         return {k: v for k, v in doc.metadata.items() if v}
     finally:
@@ -282,10 +282,10 @@ def test_preserve_metadata_of_absent_key_is_not_an_error():
 
 def test_preserve_metadata_survives_the_dpi_downsample_path():
     """The stamp must outlive the lossy arm too, not just the lossless one."""
-    pm = fitz.Pixmap(fitz.csRGB, 1500, 1500, os.urandom(1500 * 1500 * 3), False)
-    doc = fitz.open()
+    pm = pymupdf.Pixmap(pymupdf.csRGB, 1500, 1500, os.urandom(1500 * 1500 * 3), False)
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_image(fitz.Rect(50, 50, 250, 250), pixmap=pm)
+    page.insert_image(pymupdf.Rect(50, 50, 250, 250), pixmap=pm)
     doc.set_metadata({"subject": SPEC_13_SUBJECT, "producer": "SomeTool 9"})
     src = doc.tobytes(garbage=4, deflate=True)
     doc.close()
@@ -341,7 +341,7 @@ def test_thumbnails_are_actually_stripped():
     ``not (clean_pages or hidden_text)`` before its thumbnail branch, and
     this op passes both False deliberately. Measured against pymupdf 1.27.2
     on 2026-08-02; ``null_page_thumbnails`` closes it."""
-    doc = fitz.open(stream=_make_stamped_pdf(), filetype="pdf")
+    doc = pymupdf.open(stream=_make_stamped_pdf(), filetype="pdf")
     page = doc[0]
     pix = page.get_pixmap(dpi=12)
     tx = doc.get_new_xref()
@@ -351,14 +351,14 @@ def test_thumbnails_are_actually_stripped():
     src = doc.tobytes(garbage=0, deflate=True)
     doc.close()
 
-    pre = fitz.open(stream=src, filetype="pdf")
+    pre = pymupdf.open(stream=src, filetype="pdf")
     try:
         assert pre.xref_get_key(pre[0].xref, "Thumb") != ("null", "null")
     finally:
         pre.close()
 
     out, _ = reduce_size(src)
-    post = fitz.open(stream=out, filetype="pdf")
+    post = pymupdf.open(stream=out, filetype="pdf")
     try:
         assert post.xref_get_key(post[0].xref, "Thumb") == ("null", "null")
     finally:
@@ -418,7 +418,7 @@ def test_no_grow_guard_returns_input_bytes_identical(monkeypatch):
     def fat_save(self, buf, *a, **k):
         buf.write(b"%PDF-1.7\n" + b"0" * (len(src) + 4096))
 
-    monkeypatch.setattr(fitz.Document, "save", fat_save)
+    monkeypatch.setattr(pymupdf.Document, "save", fat_save)
     out, info = reduce_size(src)
     assert out == src                            # bytes-identical original
     assert info["orig_size"] == info["new_size"] == len(src)
@@ -434,7 +434,7 @@ def test_rewrite_images_failure_falls_back_to_lossless(monkeypatch):
     def boom(self, *a, **k):
         raise RuntimeError("synthetic image-rewrite failure")
 
-    monkeypatch.setattr(fitz.Document, "rewrite_images", boom)
+    monkeypatch.setattr(pymupdf.Document, "rewrite_images", boom)
     out, info = reduce_size(src, dpi=150)
     # Graceful: no exception, downsample skipped (applied_dpi None), still
     # a valid PDF (lossless result or no-grow original).
@@ -448,7 +448,7 @@ def test_subset_fonts_failure_is_non_fatal(monkeypatch):
     def boom(self, *a, **k):
         raise RuntimeError("synthetic font-subset failure")
 
-    monkeypatch.setattr(fitz.Document, "subset_fonts", boom)
+    monkeypatch.setattr(pymupdf.Document, "subset_fonts", boom)
     out, info = reduce_size(src)               # lossless path still completes
     assert info["new_size"] == len(out)
     _open_clean(out).close()
@@ -462,7 +462,7 @@ def test_save_failure_propagates(monkeypatch):
     def boom(self, *a, **k):
         raise RuntimeError("synthetic disk-full")
 
-    monkeypatch.setattr(fitz.Document, "save", boom)
+    monkeypatch.setattr(pymupdf.Document, "save", boom)
     with pytest.raises(RuntimeError, match="disk-full"):
         reduce_size(src)
 

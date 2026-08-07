@@ -12,7 +12,7 @@ Protocol versions
 * **v4** (Session 295): adds stateful handle protocol. ``open_doc`` parses
   once and returns a handle UUID; per-page ops take ``handle`` instead of
   ``pdf_b64``. ``close_doc`` releases the cached document. Subprocess holds
-  a parsed ``fitz.Document`` per handle, capped at ``_DOC_CACHE_MAX_SIZE``
+  a parsed ``pymupdf.Document`` per handle, capped at ``_DOC_CACHE_MAX_SIZE``
   via LRU eviction. Stateless v2/v3 ops remain available -- v4 is purely
   additive so older clients continue to work against a v4 subprocess.
 """
@@ -58,7 +58,7 @@ from lexcloak_pdf_tool import (
 from lexcloak_pdf_tool.coords import deserialize_chardata, serialize_chardata
 from lexcloak_pdf_tool.cover_page import _insert_cover_page_doc
 # Doc-variant helpers for the v4 stateful handle protocol. These take an
-# already-open ``fitz.Document`` and reuse the same body as the bytes
+# already-open ``pymupdf.Document`` and reuse the same body as the bytes
 # wrappers (which open + close per call). Underscore-prefixed because the
 # library API exposes the bytes form publicly; the doc form is internal
 # to the CLI's stateful protocol.
@@ -97,9 +97,28 @@ from lexcloak_pdf_tool.render import _render_page_doc
 # emits ``"MuPDF error: ...\n\n"`` on fd 1 ahead of the proper length
 # prefix; the parent reads ``M u P D`` (= 0x4D755044 = 1,299,533,892)
 # as the frame size and aborts.
-import fitz as _fitz
+#
+# Import ``pymupdf``, never the legacy ``fitz`` alias. Two reasons, and the
+# first one bites before ``set_messages`` below can run:
+#
+# 1. ``import fitz`` writes to stdout at IMPORT time. PyMuPDF 1.28.2 made the
+#    alias print ``"warning: The `fitz` API is deprecated ..."`` (99 bytes) on
+#    fd 1 -- and an import-time write lands ahead of every mitigation this
+#    module installs. The parent read ``w a r n`` (= 0x7761726E =
+#    2,002,874,990) as a frame length and every PDF op died. Nothing in the
+#    protocol can defend a channel that is already dirty at startup; only not
+#    importing the alias can.
+# 2. PyMuPDF says the alias "will be removed in future", at which point
+#    ``import fitz`` is an ImportError and the subprocess cannot start at all.
+#
+# ``pymupdf`` is the same module object under both names -- ``fitz`` is a
+# ``from pymupdf import *`` shim -- so this is a spelling change, not a
+# behavior change. Verified on 1.27.2.3 and 1.28.2: every attribute this
+# package uses resolves to the identical object. Guarded by
+# tests/test_cli.py::test_importing_the_package_writes_nothing_to_stdout.
+import pymupdf as _pymupdf
 
-_fitz.set_messages(stream=sys.stderr)
+_pymupdf.set_messages(stream=sys.stderr)
 
 
 # Protocol constants -- see docs/PROTOCOL.md.
@@ -115,13 +134,13 @@ LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
 
 
 # ── Stateful handle cache (v4) ───────────────────────────────────────
-# UUID-keyed cache of parsed ``fitz.Document`` instances. ``OrderedDict``
+# UUID-keyed cache of parsed ``pymupdf.Document`` instances. ``OrderedDict``
 # carries LRU eviction order: ``move_to_end`` on access, ``popitem(last=
 # False)`` to evict the oldest. Bound the cache to a small N so a long-
 # running subprocess that leaks handles (or holds many concurrently for a
 # legitimate compare-docs use case) can't exhaust memory.
 _DOC_CACHE_MAX_SIZE = 16
-_DOC_CACHE: "OrderedDict[str, _fitz.Document]" = OrderedDict()
+_DOC_CACHE: "OrderedDict[str, _pymupdf.Document]" = OrderedDict()
 
 
 class HandleNotFound(Exception):
@@ -138,7 +157,7 @@ def _evict_lru_if_full() -> None:
             pass
 
 
-def _store_handle(doc: _fitz.Document) -> str:
+def _store_handle(doc: _pymupdf.Document) -> str:
     """Insert ``doc`` under a fresh UUID handle. Evicts LRU if at capacity."""
     _evict_lru_if_full()
     handle = str(uuid.uuid4())
@@ -146,8 +165,8 @@ def _store_handle(doc: _fitz.Document) -> str:
     return handle
 
 
-def _resolve_handle(handle: Any) -> _fitz.Document:
-    """Return the cached ``fitz.Document`` for ``handle``, marking it MRU.
+def _resolve_handle(handle: Any) -> _pymupdf.Document:
+    """Return the cached ``pymupdf.Document`` for ``handle``, marking it MRU.
 
     Raises :class:`HandleNotFound` if the handle is missing, closed, or
     of the wrong type. The CLI dispatcher reflects the exception class
@@ -686,7 +705,7 @@ def _op_insert_cover_page_h(cmd: dict) -> dict:
 
 
 def _save_doc_bytes(doc) -> bytes:
-    """Serialize a live ``fitz.Document`` with the standard save params."""
+    """Serialize a live ``pymupdf.Document`` with the standard save params."""
     buf = io.BytesIO()
     doc.save(buf, garbage=4, deflate=True, clean=True)
     return buf.getvalue()

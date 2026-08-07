@@ -17,7 +17,7 @@ non-empty hOCR.
 """
 from __future__ import annotations
 
-import fitz
+import pymupdf
 import pytest
 
 from lexcloak_pdf_tool.ocr import (
@@ -64,9 +64,9 @@ def test_run_tesseract_real_roundtrip_reads_text():
     """End-to-end: a rendered text PNG OCRs to NON-EMPTY hOCR containing the
     seeded word — proving the ``-c`` invocation actually produces output (the
     bug returned an empty skeleton)."""
-    doc = fitz.open()
+    doc = pymupdf.open()
     page = doc.new_page(width=612, height=792)
-    page.insert_text(fitz.Point(72, 200), "HELLOWORLD", fontsize=32)
+    page.insert_text(pymupdf.Point(72, 200), "HELLOWORLD", fontsize=32)
     pix = page.get_pixmap(dpi=OCR_DPI)
     png = pix.tobytes("png")
     doc.close()

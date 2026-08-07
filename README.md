@@ -30,7 +30,7 @@ The CLI speaks two protocol modes against the same socket:
 * **Stateful handle protocol (v4+)** — `open_doc(pdf_b64)` parses once and
   returns a UUID handle. Per-page ops take `handle` instead of `pdf_b64`.
   `close_doc(handle)` releases the cached doc. Subprocess holds parsed
-  `fitz.Document` instances keyed by handle, capped via LRU eviction.
+  `pymupdf.Document` instances keyed by handle, capped via LRU eviction.
   Eliminates per-call PDF re-shoveling on the wire — load-bearing for
   long documents where the IPC payload dominates the actual op cost.
 
