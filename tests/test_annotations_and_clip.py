@@ -38,17 +38,14 @@ Synthetic fixtures only.
 from __future__ import annotations
 
 import base64
-import io
 import math
 
-import numpy as np
 import pymupdf
 import pytest
-from PIL import Image
 
 from lexcloak_pdf_tool.__main__ import _OPS, PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
 from lexcloak_pdf_tool.annotations import list_annotations
-from lexcloak_pdf_tool.render import render_clip, render_page
+from lexcloak_pdf_tool.render import render_clip
 
 PAGE_W, PAGE_H = 612.0, 792.0
 SECRET = "PATIENT-NOTE-4417-DO-NOT-SHIP"
@@ -57,6 +54,19 @@ AUTHOR = "Dr Synthetic"
 
 def _b64(b: bytes) -> str:
     return base64.b64encode(b).decode("ascii")
+
+
+def _rows(pix, x0: int, y0: int, x1: int, y1: int) -> bytes:
+    """Bytes of a sub-rectangle of ``pix``, row-major.
+
+    Deliberately hand-rolled rather than pulled from numpy/PIL: this package
+    depends on pymupdf alone, and a test-only image stack would be the first
+    crack in that. ``samples`` is row-major with stride ``width * n``.
+    """
+    n, w = pix.n, pix.width
+    buf = pix.samples
+    return b"".join(buf[(y * w + x0) * n:(y * w + x1) * n]
+                    for y in range(y0, y1))
 
 
 def _doc_with_annots() -> bytes:
@@ -196,39 +206,43 @@ class TestRenderClipRaster:
     ])
     def test_matches_an_in_process_clip_pixmap_byte_for_byte(self, clip):
         pdf = _plain_doc()
-        png = render_clip(pdf, 0, clip, dpi=300, gray=True)
-        got = np.array(Image.open(io.BytesIO(png)).convert("L"), dtype=np.uint8)
-
+        got = pymupdf.Pixmap(render_clip(pdf, 0, clip, dpi=300, gray=True))
         doc = pymupdf.open(stream=pdf, filetype="pdf")
         try:
-            pix = doc[0].get_pixmap(clip=clip, dpi=300,
-                                    colorspace=pymupdf.csGRAY)
-            want = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                pix.height, pix.width)
+            want = doc[0].get_pixmap(clip=clip, dpi=300,
+                                     colorspace=pymupdf.csGRAY)
+            assert (got.width, got.height, got.n) == (want.width, want.height,
+                                                      want.n)
+            assert got.samples == want.samples
         finally:
             doc.close()
-        assert got.shape == want.shape
-        assert np.array_equal(got, want)
 
     def test_grid_aligned_clip_agrees_with_a_page_render_crop(self):
         """Documents the equivalence that DOES hold, so the next reader
         does not assume it holds generally -- see the fractional case."""
         pdf = _plain_doc()
         clip = (72.0, 72.0, 216.0, 216.0)
-        s = 300 / 72.0
-        page_png = render_page(pdf, 0, dpi=300)
-        page = np.array(Image.open(io.BytesIO(page_png)).convert("L"), np.uint8)
-        crop = page[int(clip[1] * s):int(clip[3] * s),
-                    int(clip[0] * s):int(clip[2] * s)]
-        clip_png = render_clip(pdf, 0, clip, dpi=300, gray=True)
-        got = np.array(Image.open(io.BytesIO(clip_png)).convert("L"), np.uint8)
-        assert np.array_equal(got, crop)
+        scale = 300 / 72.0
+        got = pymupdf.Pixmap(render_clip(pdf, 0, clip, dpi=300, gray=True))
+        # `render_page` emits RGB while `render_clip` emits gray, so the
+        # like-for-like page raster is a gray page render -- otherwise this
+        # would be testing the colour conversion, not the grid alignment.
+        doc = pymupdf.open(stream=pdf, filetype="pdf")
+        try:
+            page_gray = doc[0].get_pixmap(dpi=300, colorspace=pymupdf.csGRAY)
+        finally:
+            doc.close()
+        crop = _rows(page_gray, int(clip[0] * scale), int(clip[1] * scale),
+                     int(clip[2] * scale), int(clip[3] * scale))
+        assert got.samples == crop
 
     def test_gray_false_yields_three_channels(self):
-        png = render_clip(_plain_doc(), 0, (72.0, 72.0, 216.0, 216.0),
-                          dpi=150, gray=False)
-        assert Image.open(io.BytesIO(png)).convert("RGB").size[0] > 0
-        assert Image.open(io.BytesIO(png)).mode in ("RGB", "P", "L")
+        colour = pymupdf.Pixmap(render_clip(
+            _plain_doc(), 0, (72.0, 72.0, 216.0, 216.0), dpi=150, gray=False))
+        grey = pymupdf.Pixmap(render_clip(
+            _plain_doc(), 0, (72.0, 72.0, 216.0, 216.0), dpi=150, gray=True))
+        assert colour.n == 3 and grey.n == 1
+        assert (colour.width, colour.height) == (grey.width, grey.height)
 
     def test_extent_follows_pymupdf_irect_rounding(self):
         """floor top-left / ceil bottom-right -- pinned so a future change
@@ -236,10 +250,9 @@ class TestRenderClipRaster:
         pdf = _plain_doc()
         clip = (42.3, 80.7, 222.3, 260.7)
         s = 300 / 72.0
-        png = render_clip(pdf, 0, clip, dpi=300, gray=True)
-        w, h = Image.open(io.BytesIO(png)).size
-        assert w == math.ceil(clip[2] * s) - math.floor(clip[0] * s)
-        assert h == math.ceil(clip[3] * s) - math.floor(clip[1] * s)
+        pix = pymupdf.Pixmap(render_clip(pdf, 0, clip, dpi=300, gray=True))
+        assert pix.width == math.ceil(clip[2] * s) - math.floor(clip[0] * s)
+        assert pix.height == math.ceil(clip[3] * s) - math.floor(clip[1] * s)
 
 
 class TestRenderClipSadPaths:
@@ -280,8 +293,8 @@ class TestOpDispatch:
         out = _OPS["render_clip"]({
             "pdf_b64": _b64(_plain_doc()), "page": 0,
             "clip": [72.0, 72.0, 216.0, 216.0], "dpi": 300.0, "gray": True})
-        img = Image.open(io.BytesIO(base64.b64decode(out["png_b64"])))
-        assert img.size == (600, 600)
+        pix = pymupdf.Pixmap(base64.b64decode(out["png_b64"]))
+        assert (pix.width, pix.height) == (600, 600)
 
     @pytest.mark.parametrize("clip", [None, "nope", [1, 2, 3], [1, 2, 3, 4, 5],
                                       ["a", "b", "c", "d"]])
