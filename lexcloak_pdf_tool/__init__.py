@@ -54,7 +54,7 @@ version = _pymupdf.version
 #: back to it when ``importlib.metadata`` has no dist-info to read (e.g. inside
 #: the frozen PyInstaller bundle). Keep it a plain string literal so
 #: setuptools can extract it statically without importing this module.
-__version__ = "0.6.7"
+__version__ = "0.6.8"
 
 
 def pymupdf_version() -> str:

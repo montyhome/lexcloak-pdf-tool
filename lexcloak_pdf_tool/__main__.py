@@ -126,8 +126,8 @@ _pymupdf.set_messages(stream=sys.stderr)
 # the stateful handle protocol (open_doc/close_doc + per-op _h variants).
 # v2/v3 stay supported so a v4 subprocess can still serve older clients
 # cleanly. Once every shipping client speaks v4, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 4
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4}
+PROTOCOL_VERSION = 5
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -337,6 +337,35 @@ def _op_render(cmd: dict) -> dict:
     dpi = float(cmd.get("dpi", 150))
     png = render_page(pdf_bytes, page, dpi=dpi)
     return {"png_b64": base64.b64encode(png).decode("ascii")}
+
+
+def _op_render_clip(cmd: dict) -> dict:
+    """Render one clip of one page (v5+). See `render.render_clip`."""
+    from .render import render_clip
+    pdf_bytes = _decode_pdf(cmd)
+    clip = cmd.get("clip")
+    if not isinstance(clip, (list, tuple)) or len(clip) != 4:
+        raise ValueError(
+            "clip must be a 4-element [x0, y0, x1, y1] array, got "
+            f"{type(clip).__name__}"
+        )
+    try:
+        clip = tuple(float(v) for v in clip)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"clip coords must be numeric: {exc}") from exc
+    png = render_clip(pdf_bytes, int(cmd.get("page", 0)), clip,
+                      dpi=float(cmd.get("dpi", 150)),
+                      gray=bool(cmd.get("gray", True)))
+    return {"png_b64": base64.b64encode(png).decode("ascii")}
+
+
+def _op_list_annotations(cmd: dict) -> dict:
+    """Per-page annotation subtype counts (v5+). Never contents.
+
+    See `annotations.list_annotations` for why the payload is this narrow.
+    """
+    from .annotations import list_annotations
+    return {"pages": list_annotations(_decode_pdf(cmd))}
 
 
 def _op_extract_native(cmd: dict) -> dict:
@@ -781,6 +810,8 @@ def _op_encrypt_h(cmd: dict) -> dict:
 _OPS = {
     # v2/v3 stateless ops
     "render": _op_render,
+    "render_clip": _op_render_clip,
+    "list_annotations": _op_list_annotations,
     "extract_native": _op_extract_native,
     "extract_ocr": _op_extract_ocr,
     "extract_text_dict": _op_extract_text_dict,
