@@ -1,9 +1,10 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.4.0 ships
-protocol version 4.** v2 + v3 stay in the supported set so a v4 subprocess
-serves older clients cleanly during rolling closed-app upgrades.
+parent via length-prefixed JSON frames over stdin/stdout. **v0.6.8 ships
+protocol version 5.** v2 + v3 + v4 stay in the supported set so a v5
+subprocess serves older clients cleanly during rolling closed-app
+upgrades.
 
 There are two protocol modes (the subprocess speaks both simultaneously):
 
@@ -99,6 +100,63 @@ Render a PDF page to PNG bytes.
 | `dpi` | float | `150` |
 
 **Result:** `{"png_b64": str}`.
+
+### `render_clip`  *(v5+)*
+
+Render **only a clip** of a page to PNG bytes.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required |
+| `page` | int | `0` |
+| `clip` | `[x0, y0, x1, y1]` floats, PDF points | required |
+| `dpi` | float | `150` |
+| `gray` | bool | `true` |
+
+**Result:** `{"png_b64": str}`.
+
+This is **not** equivalent to `render` followed by a crop. MuPDF aligns the
+output pixel grid to the clip's own — possibly fractional — origin, so the
+two rasters agree only when the clip lands on an integer pixel boundary.
+Measured on a 300-DPI page over 40 randomized fractional clips: a page-render
+crop matches the clip render's geometry only under `irect` rounding (floor
+the top-left, ceil the bottom-right) and is byte-identical in 27 of 40; the
+rest differ by 1–9 intensity levels on ≤2.73% of pixels. A caller verifying a
+region against what a clip render produced must use this op.
+
+Refuses rather than returning a misleading image: `IndexError` for a page
+index out of range, `ValueError` for a clip that is degenerate or clamps away
+to nothing against the page rect, and `ValueError` for an encrypted document
+(which would otherwise render blank).
+
+### `list_annotations`  *(v5+)*
+
+Per-page annotation **subtype names and counts**.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required |
+
+**Result:** `{"pages": [{"page": int, "subtypes": {str: int}}, ...]}` — one
+entry per page in page order, with an empty `subtypes` dict for a page
+carrying none (pages are never omitted).
+
+**The payload is deliberately this narrow and must stay so.** Never
+annotation contents, text, rects, author or dates. The intended caller folds
+this into a diagnostics record documented as PHI-free; an op that *could*
+return annotation text would make that claim depend on caller restraint
+rather than on this op's inability to leak.
+
+Two behaviours worth knowing before relying on it:
+
+* **`/Link` annotations are not reported.** PyMuPDF's `page.annots()` does
+  not yield them — they are reached through `page.links()` — so a document
+  full of hyperlinks reports no annotations here.
+* **Encrypted documents are refused, not reported as empty.** Such a
+  document opens cleanly and reports a page count; the failure appears only
+  when something walks the annots. Since the caller is proving a *negative*,
+  returning "no annotations" for a document nothing could read is the exact
+  wrong answer, so the op raises `ValueError` naming the cause instead.
 
 ### `extract_native`
 
@@ -525,3 +583,4 @@ shipping client has caught up.
 | 0.6.4 | 4 | **Superseded by 0.6.5 — do not pin.** Same per-match `redact_label` as 0.6.5, but made the numeric token-boundary rule *unconditional*, which silently changed the semantics of every `search_whole_word_in_chars` caller including ones searching for human-typed needles. 0.6.5 puts that rule behind an opt-in flag. The tag remains published (tags are immutable) but nothing should reference it. |
 | 0.6.5 | 4 | No new ops, no wire-surface change. (1) `apply_redactions` accepts an optional per-match `redact_label` overriding the document-level label for that box; absent/empty falls back, so a label-free payload is byte-identical to 0.6.3 (verified A/B across three document-label shapes, modulo the random trailer `/ID`). (2) `search_whole_word_in_chars` gains a keyword-only `numeric_token_boundary=False`: when True, a numeric-shaped needle no longer matches inside a longer number through an intra-number separator (`12` in `18-12-107.5`). **The default is the historical behavior**, so no existing caller changes — including the `search_for` op, whose `whole_word=True` path is untouched. Alpha and mixed needles are unaffected either way. The flag exists because whether a numeric fragment is noise depends on the needle's provenance, which only the caller knows: detector-inferred needles want it True, human-typed needles want it False. |
 | 0.6.7 | 4 | No new ops, no wire-surface change — frames are byte-identical to 0.6.6. Retires the deprecated `fitz` alias: the package and its tests now `import pymupdf`. `fitz` is a `from pymupdf import *` shim, so every name this package uses resolves to the identical object (verified against PyMuPDF 1.27.2.3 and 1.28.2) — but `import fitz` writes a deprecation warning to **stdout** at import time on 1.28.2+, and stdout is this protocol's frame channel. An import-time write lands ahead of every in-process mitigation, so not importing the alias is the only fix that reaches it. PyMuPDF also states the alias will be removed in a future release, which would make the subprocess unstartable. `PROTOCOL_VERSION` stays 4; the supported set stays {2, 3, 4}. |
+| 0.6.8 | **5** | Adds `render_clip` and `list_annotations` (v5+). **Bumps the protocol version, departing from the additive-no-bump precedent set at 0.6.0/0.6.3** — deliberately. Those additions were optional enhancements a client could simply not call; these two back a closed-app export-integrity gate that fails CLOSED, so a client built against them has no safe degraded mode. Advertising 5 lets that client detect an too-old subprocess from the startup banner and refuse to start, instead of discovering it as a per-export refusal once a user is mid-document. The supported set widens to {2, 3, 4, 5}, so every existing client — including the closed app, which declares 2 on stateless calls — is unaffected. |
