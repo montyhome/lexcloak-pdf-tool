@@ -57,6 +57,7 @@ from lexcloak_pdf_tool import (
 )
 from lexcloak_pdf_tool.coords import deserialize_chardata, serialize_chardata
 from lexcloak_pdf_tool.cover_page import _insert_cover_page_doc
+from lexcloak_pdf_tool.page_split import extract_pages, extract_pages_from_doc
 # Doc-variant helpers for the v4 stateful handle protocol. These take an
 # already-open ``pymupdf.Document`` and reuse the same body as the bytes
 # wrappers (which open + close per call). Underscore-prefixed because the
@@ -122,12 +123,15 @@ _pymupdf.set_messages(stream=sys.stderr)
 
 
 # Protocol constants -- see docs/PROTOCOL.md.
-# v3 (2026-05-09) added the ``all_page_sizes`` op. v4 (2026-05-10) adds
+# v3 (2026-05-09) added the ``all_page_sizes`` op. v4 (2026-05-10) added
 # the stateful handle protocol (open_doc/close_doc + per-op _h variants).
-# v2/v3 stay supported so a v4 subprocess can still serve older clients
-# cleanly. Once every shipping client speaks v4, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 5
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5}
+# v5 (0.6.8) added ``render_clip`` + ``list_annotations``. v6 (0.7.0)
+# adds ``extract_pages``/``extract_pages_h`` (page-range split with
+# re-based bookmarks). Older versions stay supported so a newer
+# subprocess can still serve older clients cleanly; once every shipping
+# client speaks v4+, drop 2 + 3 from the set.
+PROTOCOL_VERSION = 6
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -477,6 +481,18 @@ def _op_reduce_size(cmd: dict) -> dict:
     }
 
 
+def _op_extract_pages(cmd: dict) -> dict:
+    """v6: one contiguous page range as a standalone PDF (see page_split)."""
+    pdf_bytes = _decode_pdf(cmd)
+    from_page = int(cmd.get("from_page", 0))
+    to_page = int(cmd.get("to_page", -1))
+    out_bytes = extract_pages(pdf_bytes, from_page, to_page)
+    return {
+        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        "page_count": to_page - from_page + 1,
+    }
+
+
 def _op_page_count(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     return {"count": page_count(pdf_bytes)}
@@ -807,6 +823,23 @@ def _op_encrypt_h(cmd: dict) -> dict:
     }
 
 
+def _op_extract_pages_h(cmd: dict) -> dict:
+    """v6: page-range extraction from the cached doc.
+
+    Read-only against the handle — the cached document is never mutated
+    or closed, so the handle stays fully usable afterwards (unlike the
+    mutate-and-save ``_h`` ops above).
+    """
+    doc = _resolve_handle(_get_handle(cmd))
+    from_page = int(cmd.get("from_page", 0))
+    to_page = int(cmd.get("to_page", -1))
+    out_bytes = extract_pages_from_doc(doc, from_page, to_page)
+    return {
+        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        "page_count": to_page - from_page + 1,
+    }
+
+
 _OPS = {
     # v2/v3 stateless ops
     "render": _op_render,
@@ -849,6 +882,9 @@ _OPS = {
     "insert_cover_page_h": _op_insert_cover_page_h,
     "reduce_size_h": _op_reduce_size_h,
     "encrypt_h": _op_encrypt_h,
+    # v6 page-range split
+    "extract_pages": _op_extract_pages,
+    "extract_pages_h": _op_extract_pages_h,
 }
 
 
