@@ -509,7 +509,7 @@ def test_startup_line_emitted_on_stderr():
     code, stderr = s.close()
     text = stderr.decode("utf-8", errors="replace")
     assert "lexcloak_pdf_tool starting" in text
-    assert "protocol_version=5" in text
+    assert "protocol_version=6" in text
     assert "pymupdf_version=" in text
 
 
@@ -555,24 +555,35 @@ def test_protocol_version_v1_rejected():
     assert resp["error_type"] == "ProtocolVersionMismatch"
 
 
-def test_protocol_version_v6_rejected():
+def test_protocol_version_v7_rejected():
     """Future versions outside the supported set are rejected.
 
-    Was ``v5_rejected`` until 0.6.8, when v5 joined the supported set for
-    the `render_clip` + `list_annotations` ops. The assertion it encodes --
-    "a version we do not know is refused, not ignored" -- is what matters,
-    so it moves to the next unsupported number rather than being deleted.
+    Was ``v5_rejected`` until 0.6.8 (`render_clip` + `list_annotations`)
+    and ``v6_rejected`` until 0.7.0, when v6 joined the supported set for
+    the `extract_pages` ops. The assertion it encodes -- "a version we do
+    not know is refused, not ignored" -- is what matters, so it moves to
+    the next unsupported number rather than being deleted.
     """
     with CLISession() as s:
-        s.write_frame({"protocol_version": 6, "op": "page_count",
+        s.write_frame({"protocol_version": 7, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf())})
         resp = s.read_frame()
     assert resp["ok"] is False
     assert resp["error_type"] == "ProtocolVersionMismatch"
 
 
-def test_protocol_version_v5_now_accepted():
-    """The counterpart to the above: v5 is the version the 0.6.8 ops need."""
+def test_protocol_version_v6_now_accepted():
+    """The counterpart to the above: v6 is the version the 0.7.0 ops need."""
+    with CLISession() as s:
+        s.write_frame({"protocol_version": 6, "op": "page_count",
+                       "pdf_b64": _b64(_make_pdf(n_pages=3))})
+        resp = s.read_frame()
+    assert resp["ok"] is True
+    assert resp["result"]["count"] == 3
+
+
+def test_protocol_version_v5_still_accepted():
+    """v5 stays in the supported set (the 0.6.8 render_clip clients)."""
     with CLISession() as s:
         s.write_frame({"protocol_version": 5, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf(n_pages=3))})
