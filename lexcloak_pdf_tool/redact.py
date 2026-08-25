@@ -17,6 +17,18 @@ def open_pdf(pdf_bytes: bytes) -> _pymupdf.Document:
     return _pymupdf.open(stream=pdf_bytes, filetype="pdf")
 
 
+def open_pdf_path(pdf_path: str) -> _pymupdf.Document:
+    """Open a PDF from a filesystem path -- module-local helper.
+
+    The path form is not a convenience wrapper around :func:`open_pdf`: it
+    has a different memory profile. PyMuPDF mmaps a file opened by path, so
+    N concurrent readers of the same document share one set of OS page-cache
+    pages, where N readers each handed the bytes hold N private copies.
+    Callers that genuinely only have bytes should still use ``open_pdf``.
+    """
+    return _pymupdf.open(pdf_path, filetype="pdf")
+
+
 def _validate_redaction_payload(matches: list[dict],
                                 removed_pages: list[int] | None,
                                 blackout_pages: list[int] | None = None) -> None:

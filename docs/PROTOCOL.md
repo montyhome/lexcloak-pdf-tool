@@ -49,7 +49,8 @@ as a clean exit.
        | "set_metadata" | "insert_cover_page" | "reduce_size"
        | "page_count" | "page_size" | "all_page_sizes"
        | "is_encrypted" | "get_metadata" | "decrypt" | "encrypt"
-       | "open_doc" | "close_doc"
+       | "open_doc" | "close_doc" | "open_doc_path"
+       | "extract_pages" | "extract_pages_h"
        | "render_h" | "extract_native_h" | "extract_ocr_h"
        | "extract_text_dict_h" | "extract_text_plain_h"
        | "search_for_h" | "apply_redactions_h" | "strip_metadata_h"
@@ -498,6 +499,35 @@ evicted on overflow).
 
 **Result:** `{"handle": str}` (UUID4 in canonical 8-4-4-4-12 hex form).
 
+### `open_doc_path` (v6+)
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_path` | string (absolute filesystem path) | required |
+
+**Result:** `{"handle": str}` — identical to `open_doc`, including LRU
+eviction and `close_doc` semantics. An encrypted document is opened and
+handed back exactly as `open_doc` does; ask `is_encrypted_h`.
+
+**Why it exists.** `open_doc` receives the document inline, so N concurrent
+readers of one document hold N private copies — and in the closed app each
+OCR worker is such a reader, with a second copy in its own subprocess.
+PyMuPDF mmaps a file opened by path, so the OS page cache holds one shared
+set of pages instead. Measured on a 185 MB document: per-reader USS
+285 MB → 100 MB, marginal cost per added reader 318 MB → 135 MB.
+
+**Errors.** `KeyError` (field absent), `ValueError` (not a non-empty
+string), `FileNotFoundError` (missing, or not a regular file — a directory
+lands here), `PermissionError` (present but unreadable). A file that exists
+and is readable but is not a PDF surfaces PyMuPDF's own `FileDataError`.
+
+**The path never appears in an error message.** Callers pass real user
+filesystem paths, and a filename can itself be sensitive. Every error from
+this op — including PyMuPDF's, which does interpolate the filename — is
+scrubbed to `<pdf_path>` before it crosses the wire. The exception *class*
+is preserved so callers can still distinguish causes. Do not add the path
+back for debuggability; the caller already knows which path it sent.
+
 ### `close_doc`
 
 | Input field | Type | Default |
@@ -607,5 +637,5 @@ shipping client has caught up.
 | 0.6.4 | 4 | **Superseded by 0.6.5 — do not pin.** Same per-match `redact_label` as 0.6.5, but made the numeric token-boundary rule *unconditional*, which silently changed the semantics of every `search_whole_word_in_chars` caller including ones searching for human-typed needles. 0.6.5 puts that rule behind an opt-in flag. The tag remains published (tags are immutable) but nothing should reference it. |
 | 0.6.5 | 4 | No new ops, no wire-surface change. (1) `apply_redactions` accepts an optional per-match `redact_label` overriding the document-level label for that box; absent/empty falls back, so a label-free payload is byte-identical to 0.6.3 (verified A/B across three document-label shapes, modulo the random trailer `/ID`). (2) `search_whole_word_in_chars` gains a keyword-only `numeric_token_boundary=False`: when True, a numeric-shaped needle no longer matches inside a longer number through an intra-number separator (`12` in `18-12-107.5`). **The default is the historical behavior**, so no existing caller changes — including the `search_for` op, whose `whole_word=True` path is untouched. Alpha and mixed needles are unaffected either way. The flag exists because whether a numeric fragment is noise depends on the needle's provenance, which only the caller knows: detector-inferred needles want it True, human-typed needles want it False. |
 | 0.6.7 | 4 | No new ops, no wire-surface change — frames are byte-identical to 0.6.6. Retires the deprecated `fitz` alias: the package and its tests now `import pymupdf`. `fitz` is a `from pymupdf import *` shim, so every name this package uses resolves to the identical object (verified against PyMuPDF 1.27.2.3 and 1.28.2) — but `import fitz` writes a deprecation warning to **stdout** at import time on 1.28.2+, and stdout is this protocol's frame channel. An import-time write lands ahead of every in-process mitigation, so not importing the alias is the only fix that reaches it. PyMuPDF also states the alias will be removed in a future release, which would make the subprocess unstartable. `PROTOCOL_VERSION` stays 4; the supported set stays {2, 3, 4}. |
-| 0.7.0 | **6** | Adds `extract_pages` (+ `extract_pages_h`) — page-range split with re-based bookmarks, backing the closed app's scan-cost preflight "split into scannable parts" offer (Session 991) and sharing the v6 release with the `open_doc_path` wire work (Session 992). Bumps the protocol so a client can capability-gate the split offer from the startup banner instead of discovering an unknown op mid-flow. The supported set widens to {2, 3, 4, 5, 6}; every existing client is unaffected. |
+| 0.7.0 | **6** | Adds `extract_pages` (+ `extract_pages_h`) — page-range split with re-based bookmarks, backing the closed app's scan-cost preflight "split into scannable parts" offer (Session 991) — **and `open_doc_path`**, a handle opened from a filesystem path so concurrent readers share one mmap instead of each holding a private copy (Session 992). Both ops landed under v6 before 0.7.0 was released, so no shipped binary ever advertised 6 with only one of them; once 0.7.0 ships, a further op needs v7. Bumps the protocol so a client can capability-gate the split offer from the startup banner instead of discovering an unknown op mid-flow. The supported set widens to {2, 3, 4, 5, 6}; every existing client is unaffected. |
 | 0.6.8 | **5** | Adds `render_clip` and `list_annotations` (v5+). **Bumps the protocol version, departing from the additive-no-bump precedent set at 0.6.0/0.6.3** — deliberately. Those additions were optional enhancements a client could simply not call; these two back a closed-app export-integrity gate that fails CLOSED, so a client built against them has no safe degraded mode. Advertising 5 lets that client detect an too-old subprocess from the startup banner and refuse to start, instead of discovering it as a per-export refusal once a user is mid-document. The supported set widens to {2, 3, 4, 5}, so every existing client — including the closed app, which declares 2 on stateless calls — is unaffected. |
