@@ -1730,6 +1730,26 @@ def test_open_doc_path_non_pdf_fails_without_a_handle(tmp_path):
         assert "handle" not in (resp.get("result") or {})
 
 
+def test_open_doc_path_scrub_preserves_the_exception_class(tmp_path):
+    """Scrubbing rewrites the message, never the class.
+
+    A corrupt file and a missing one must stay distinguishable: callers
+    switch on ``error_type``. Without this, _scrub_path_from_error could
+    collapse every PyMuPDF failure to ValueError and every other test here
+    would still pass -- which is exactly what a mutation check found.
+    """
+    junk = tmp_path / "corrupt.pdf"
+    junk.write_bytes(b"not a pdf at all")
+    with CLISession() as s:
+        corrupt = s.call("open_doc_path", pdf_path=str(junk))
+        missing = s.call("open_doc_path", pdf_path=str(tmp_path / "gone.pdf"))
+    assert corrupt["error_type"] == "FileDataError"
+    assert missing["error_type"] == "FileNotFoundError"
+    assert corrupt["error_type"] != missing["error_type"]
+    # and the scrub still happened
+    assert "corrupt.pdf" not in json.dumps(corrupt)
+
+
 def test_open_doc_path_errors_never_echo_the_path(tmp_path):
     """The filename itself is PHI in this product -- it must not come back.
 
