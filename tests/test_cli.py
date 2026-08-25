@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import pathlib
 import re
 import struct
@@ -1583,3 +1584,168 @@ def test_reduce_size_wire_rejects_bare_string_preserve_metadata():
                       preserve_metadata="subject")
     assert resp["ok"] is False, resp
     assert "list or tuple" in json.dumps(resp)
+
+
+# ── open_doc_path (v6) ─────────────────────────────────────────────
+#
+# The path-based sibling of open_doc. These tests deliberately assert
+# open_doc_path against open_doc's OWN observed behaviour rather than
+# against a hard-coded expectation, so the two can never silently drift
+# apart -- the contract is "same handle semantics, different byte source".
+
+
+def _write_pdf(tmp_path: pathlib.Path, pdf: bytes, name: str = "doc.pdf"):
+    p = tmp_path / name
+    p.write_bytes(pdf)
+    return p
+
+
+def test_open_doc_path_returns_uuid_handle(tmp_path):
+    path = _write_pdf(tmp_path, _make_pdf())
+    with CLISession() as s:
+        resp = s.call("open_doc_path", pdf_path=str(path))
+    assert resp["ok"] is True, resp
+    handle = resp["result"]["handle"]
+    assert len(handle) == 36
+    assert handle.count("-") == 4
+
+
+def test_open_doc_path_handle_is_usable_and_matches_open_doc(tmp_path):
+    """A path-opened handle answers ops identically to a bytes-opened one."""
+    pdf = _make_pdf(n_pages=3)
+    path = _write_pdf(tmp_path, pdf)
+    with CLISession() as s:
+        h_bytes = s.call("open_doc", pdf_b64=_b64(pdf))["result"]["handle"]
+        h_path = s.call("open_doc_path", pdf_path=str(path))["result"]["handle"]
+        by_bytes = s.call("page_count_h", handle=h_bytes)
+        by_path = s.call("page_count_h", handle=h_path)
+        sizes_bytes = s.call("all_page_sizes_h", handle=h_bytes)
+        sizes_path = s.call("all_page_sizes_h", handle=h_path)
+    assert by_path["ok"] is True and by_bytes["ok"] is True
+    assert by_path["result"]["count"] == 3
+    assert by_path["result"] == by_bytes["result"]
+    assert sizes_path["result"] == sizes_bytes["result"]
+
+
+def test_open_doc_path_handle_closes_like_any_other(tmp_path):
+    path = _write_pdf(tmp_path, _make_pdf())
+    with CLISession() as s:
+        handle = s.call("open_doc_path", pdf_path=str(path))["result"]["handle"]
+        closed = s.call("close_doc", handle=handle)
+        after = s.call("page_count_h", handle=handle)
+    assert closed["result"]["closed"] is True
+    assert after["ok"] is False
+    assert after["error_type"] == "HandleNotFound"
+
+
+def test_open_doc_path_encrypted_matches_open_doc_behaviour(tmp_path):
+    """Encrypted docs must behave the same through both doors.
+
+    Asserted as parity, not as a fixed verdict: whatever open_doc does with
+    an encrypted document, open_doc_path does too. Hard-coding "succeeds"
+    here would let a future change to open_pdf's encrypted handling pass
+    while the two doors quietly diverged.
+    """
+    doc = pymupdf.open()
+    doc.new_page(width=612, height=792)
+    pdf = doc.tobytes(
+        encryption=pymupdf.PDF_ENCRYPT_AES_256,
+        user_pw="real-password",
+        owner_pw="real-password",
+    )
+    doc.close()
+    path = _write_pdf(tmp_path, pdf, "enc.pdf")
+    with CLISession() as s:
+        by_bytes = s.call("open_doc", pdf_b64=_b64(pdf))
+        by_path = s.call("open_doc_path", pdf_path=str(path))
+        enc_by_path = None
+        if by_path["ok"]:
+            enc_by_path = s.call(
+                "is_encrypted_h", handle=by_path["result"]["handle"]
+            )
+            enc_by_bytes = s.call(
+                "is_encrypted_h", handle=by_bytes["result"]["handle"]
+            )
+    assert by_path["ok"] == by_bytes["ok"]
+    if by_path["ok"]:
+        assert enc_by_path["result"] == enc_by_bytes["result"]
+        assert enc_by_path["result"]["encrypted"] is True
+
+
+# ── unhappy paths ──────────────────────────────────────────────────
+
+
+def test_open_doc_path_missing_field_is_key_error():
+    with CLISession() as s:
+        resp = s.call("open_doc_path")
+    assert resp["ok"] is False
+    assert resp["error_type"] == "KeyError"
+
+
+@pytest.mark.parametrize("bad", [None, 42, "", [], {}])
+def test_open_doc_path_rejects_non_string_or_empty(bad):
+    with CLISession() as s:
+        resp = s.call("open_doc_path", pdf_path=bad)
+    assert resp["ok"] is False
+    assert resp["error_type"] == "ValueError"
+
+
+def test_open_doc_path_missing_file_is_file_not_found(tmp_path):
+    missing = tmp_path / "nope.pdf"
+    with CLISession() as s:
+        resp = s.call("open_doc_path", pdf_path=str(missing))
+    assert resp["ok"] is False
+    assert resp["error_type"] == "FileNotFoundError"
+
+
+def test_open_doc_path_directory_is_rejected_not_opened(tmp_path):
+    """A directory is not a file -- must fail the isfile guard, not PyMuPDF."""
+    with CLISession() as s:
+        resp = s.call("open_doc_path", pdf_path=str(tmp_path))
+    assert resp["ok"] is False
+    assert resp["error_type"] == "FileNotFoundError"
+
+
+def test_open_doc_path_unreadable_file_is_permission_error(tmp_path):
+    path = _write_pdf(tmp_path, _make_pdf(), "locked.pdf")
+    path.chmod(0o000)
+    try:
+        if os.access(str(path), os.R_OK):  # running as root -- guard useless
+            pytest.skip("cannot make a file unreadable as this user")
+        with CLISession() as s:
+            resp = s.call("open_doc_path", pdf_path=str(path))
+        assert resp["ok"] is False
+        assert resp["error_type"] == "PermissionError"
+    finally:
+        path.chmod(0o600)
+
+
+def test_open_doc_path_non_pdf_fails_without_a_handle(tmp_path):
+    junk = tmp_path / "not-a.pdf"
+    junk.write_bytes(b"this is plainly not a PDF")
+    with CLISession() as s:
+        resp = s.call("open_doc_path", pdf_path=str(junk))
+        # whatever it failed with, it must not have leaked a live handle
+        assert resp["ok"] is False
+        assert "handle" not in (resp.get("result") or {})
+
+
+def test_open_doc_path_errors_never_echo_the_path(tmp_path):
+    """The filename itself is PHI in this product -- it must not come back.
+
+    Covers every rejection door at once: none of them may interpolate the
+    path into the wire error. See _get_pdf_path's docstring.
+    """
+    secret = tmp_path / "Master of Jane Doe med records.pdf"
+    cases = [str(secret)]                       # missing
+    junk = tmp_path / "Jane Doe intake notes.pdf"
+    junk.write_bytes(b"not a pdf")
+    cases.append(str(junk))                     # non-PDF
+    cases.append(str(tmp_path))                 # directory
+    with CLISession() as s:
+        for target in cases:
+            resp = s.call("open_doc_path", pdf_path=target)
+            assert resp["ok"] is False, target
+            blob = json.dumps(resp)
+            assert "Jane Doe" not in blob, resp
+            assert "Master of" not in blob, resp

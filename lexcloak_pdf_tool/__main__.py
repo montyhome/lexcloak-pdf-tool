@@ -83,6 +83,7 @@ from lexcloak_pdf_tool.redact import (
     _save_encrypted,
     _strip_metadata_doc,
     open_pdf,
+    open_pdf_path,
 )
 from lexcloak_pdf_tool.reduce_size import _apply_reductions, _validate_reduce_params
 from lexcloak_pdf_tool.render import _render_page_doc
@@ -127,7 +128,11 @@ _pymupdf.set_messages(stream=sys.stderr)
 # the stateful handle protocol (open_doc/close_doc + per-op _h variants).
 # v5 (0.6.8) added ``render_clip`` + ``list_annotations``. v6 (0.7.0)
 # adds ``extract_pages``/``extract_pages_h`` (page-range split with
-# re-based bookmarks). Older versions stay supported so a newer
+# re-based bookmarks) and ``open_doc_path`` (handle from a filesystem
+# path rather than inline bytes). Both landed under v6 before any v6
+# release was cut, so no shipped binary ever advertised 6 with only a
+# subset -- do NOT add a further op to 6 once 0.7.0 is released.
+# Older versions stay supported so a newer
 # subprocess can still serve older clients cleanly; once every shipping
 # client speaks v4+, drop 2 + 3 from the set.
 PROTOCOL_VERSION = 6
@@ -316,6 +321,37 @@ def _decode_pdf(cmd: dict) -> bytes:
         return base64.b64decode(cmd["pdf_b64"], validate=True)
     except (ValueError, TypeError) as exc:
         raise ValueError(f"pdf_b64 not valid base64: {exc}") from None
+
+
+def _get_pdf_path(cmd: dict) -> str:
+    """Pull and validate the ``pdf_path`` field. Raise on missing/bad.
+
+    Mirrors :func:`_decode_pdf`'s contract for the path-based ops: ``KeyError``
+    when the field is absent, ``ValueError`` when present but unusable. The
+    existence and readability checks are here rather than left to PyMuPDF
+    because PyMuPDF reports "missing file" and "unreadable file" with the
+    same opaque message, and the caller needs to tell those apart.
+
+    Deliberately does NOT echo the path into any error message. In this
+    product the filename itself routinely carries PHI ("Master of <name> med
+    records.pdf"), and these strings travel back over the wire and may be
+    logged by the caller. The exception type names the fault; the path stays
+    on the caller's side, which already knows it. Do not "improve" these
+    messages by interpolating the path.
+    """
+    if "pdf_path" not in cmd:
+        raise KeyError("op requires 'pdf_path'")
+    pdf_path = cmd["pdf_path"]
+    if not isinstance(pdf_path, str) or not pdf_path:
+        raise ValueError(
+            f"pdf_path must be a non-empty string, got "
+            f"{type(pdf_path).__name__}"
+        )
+    if not os.path.isfile(pdf_path):
+        raise FileNotFoundError("pdf_path does not exist or is not a file")
+    if not os.access(pdf_path, os.R_OK):
+        raise PermissionError("pdf_path exists but is not readable")
+    return pdf_path
 
 
 def _get_handle(cmd: dict) -> str:
@@ -571,6 +607,53 @@ def _op_open_doc(cmd: dict) -> dict:
     """
     pdf_bytes = _decode_pdf(cmd)
     doc = open_pdf(pdf_bytes)
+    handle = _store_handle(doc)
+    return {"handle": handle}
+
+
+def _scrub_path_from_error(exc: Exception, secret_path: str) -> Exception:
+    """Return ``exc`` re-made with ``secret_path`` stripped from its message.
+
+    Our own validation never echoes the path, but PyMuPDF does: a non-PDF
+    file comes back as ``FileDataError: Failed to open file '<full path>' as
+    type pdf.`` That message crosses the wire to the caller, and in this
+    product the filename routinely carries PHI ("Master of <name> med
+    records.pdf"). Scrub it here, at the one place a path-opened document can
+    fail, rather than trusting every upstream library not to interpolate it.
+
+    The exception CLASS is preserved -- callers switch on ``error_type`` and
+    must keep being able to tell a corrupt file from a missing one. Only the
+    text changes. Both the full path and its basename are replaced, since a
+    message may quote either.
+    """
+    msg = str(exc)
+    if secret_path:
+        msg = msg.replace(secret_path, "<pdf_path>")
+        base = os.path.basename(secret_path)
+        if base:
+            msg = msg.replace(base, "<pdf_path>")
+    try:
+        return type(exc)(msg)
+    except Exception:  # noqa: BLE001 -- exotic ctor; the scrub still matters
+        return ValueError(msg)
+
+
+def _op_open_doc_path(cmd: dict) -> dict:
+    """Open the PDF at ``pdf_path`` once, store it under a UUID handle.
+
+    The path-based sibling of :func:`_op_open_doc`, added in v6. Handle
+    semantics are identical -- same UUID handle, same LRU eviction, same
+    ``close_doc`` -- and so is the treatment of an encrypted document: it is
+    opened and handed back like any other, and callers ask ``is_encrypted_h``.
+    The only difference is where the bytes come from, which is the entire
+    point: see :func:`~lexcloak_pdf_tool.redact.open_pdf_path` for why the
+    path form costs one shared mmap instead of one private copy per reader.
+    """
+    pdf_path = _get_pdf_path(cmd)
+    try:
+        doc = open_pdf_path(pdf_path)
+    except Exception as exc:  # noqa: BLE001 -- re-raised, scrubbed, below
+        raise _scrub_path_from_error(exc, pdf_path) from None
     handle = _store_handle(doc)
     return {"handle": handle}
 
@@ -885,6 +968,7 @@ _OPS = {
     # v6 page-range split
     "extract_pages": _op_extract_pages,
     "extract_pages_h": _op_extract_pages_h,
+    "open_doc_path": _op_open_doc_path,
 }
 
 
