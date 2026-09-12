@@ -95,6 +95,11 @@ pyinstaller --onefile \
 Output: `dist/lexcloak-pdf-tool` (or `.exe` on Windows). Bundle that into
 your own application and spawn it as a subprocess.
 
+The binary runs `__main__.py` as a top-level script with no parent package, so
+that file imports the package absolutely (`from lexcloak_pdf_tool.render import
+...`). A relative import works under `python -m` and fails only in the binary.
+`tests/test_frozen_entry.py` enforces this.
+
 ## OCR
 
 The `extract_ocr` op shells out to a system Tesseract binary. To enable OCR:

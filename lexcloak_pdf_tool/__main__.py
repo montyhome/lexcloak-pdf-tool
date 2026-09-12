@@ -15,6 +15,18 @@ Protocol versions
   a parsed ``pymupdf.Document`` per handle, capped at ``_DOC_CACHE_MAX_SIZE``
   via LRU eviction. Stateless v2/v3 ops remain available -- v4 is purely
   additive so older clients continue to work against a v4 subprocess.
+
+Absolute imports only
+---------------------
+This file is the PyInstaller entry script (see README, "Build a standalone
+binary"). A frozen entry script runs as a top-level ``__main__`` with no
+parent package, so a relative import (``from .render import ...``) raises
+``ImportError: attempted relative import with no known parent package`` in
+the binary while working perfectly under ``python -m lexcloak_pdf_tool``.
+v0.6.8 through v0.7.0 shipped exactly that in the ``render_clip`` and
+``list_annotations`` handlers; fixed in v0.7.1.
+``tests/test_frozen_entry.py`` enforces this and runs every op the way the
+binary starts.
 """
 from __future__ import annotations
 
@@ -381,7 +393,7 @@ def _op_render(cmd: dict) -> dict:
 
 def _op_render_clip(cmd: dict) -> dict:
     """Render one clip of one page (v5+). See `render.render_clip`."""
-    from .render import render_clip
+    from lexcloak_pdf_tool.render import render_clip
     pdf_bytes = _decode_pdf(cmd)
     clip = cmd.get("clip")
     if not isinstance(clip, (list, tuple)) or len(clip) != 4:
@@ -404,7 +416,7 @@ def _op_list_annotations(cmd: dict) -> dict:
 
     See `annotations.list_annotations` for why the payload is this narrow.
     """
-    from .annotations import list_annotations
+    from lexcloak_pdf_tool.annotations import list_annotations
     return {"pages": list_annotations(_decode_pdf(cmd))}
 
 
