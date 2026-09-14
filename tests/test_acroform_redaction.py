@@ -1,6 +1,6 @@
 """AcroForm widget-field redaction regression tests.
 
-Incident (a 2026-06-28 test-suite audit): form-field values live
+The failure these pin: form-field values live
 in the widget ``/V`` and the document AcroForm dictionary -- OUTSIDE the page
 content stream that ``page.apply_redactions()`` scrubs. Pre-fix,
 ``_apply_redactions_doc`` drew the redaction box but never flattened widgets, so
@@ -250,14 +250,13 @@ def test_no_form_pdf_redaction_unaffected():
         odoc.close()
 
 
-# ── Catalog-orphan widgets (v0.6.2, Sessions 659/660) ────────────────
+# ── Catalog-orphan widgets (v0.6.2) ──────────────────────────────────
 #
 # Page-level /Widget annotations never registered in a document /AcroForm
 # dictionary: ``doc.is_form_pdf`` is FALSE, so the v0.5.2 flatten guard
-# skipped the bake and every widget /V survived a "redacted" export
-# (forensics: a live packaged-app export shipped 46 live
-# widgets, 9 carrying values, off a generator-produced tax form; real
-# authority-published forms register fields and were never exposed).
+# skipped the bake and every widget /V survived a "redacted" export.
+# Generator-produced forms take this shape. Authority-published forms
+# register their fields and were never affected.
 # ``doc.bake`` handles the orphan shape correctly once called — the fix is
 # guard-widening only (``_has_any_widget`` page-annot scan).
 
