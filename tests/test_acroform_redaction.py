@@ -1,6 +1,6 @@
 """AcroForm widget-field redaction regression tests.
 
-Incident (Session 625, 2026-06-28 test-suite audit §7): form-field values live
+Incident (a 2026-06-28 test-suite audit): form-field values live
 in the widget ``/V`` and the document AcroForm dictionary -- OUTSIDE the page
 content stream that ``page.apply_redactions()`` scrubs. Pre-fix,
 ``_apply_redactions_doc`` drew the redaction box but never flattened widgets, so
@@ -255,7 +255,7 @@ def test_no_form_pdf_redaction_unaffected():
 # Page-level /Widget annotations never registered in a document /AcroForm
 # dictionary: ``doc.is_form_pdf`` is FALSE, so the v0.5.2 flatten guard
 # skipped the bake and every widget /V survived a "redacted" export
-# (Session 660 forensics: a live packaged-app export shipped 46 live
+# (forensics: a live packaged-app export shipped 46 live
 # widgets, 9 carrying values, off a generator-produced tax form; real
 # authority-published forms register fields and were never exposed).
 # ``doc.bake`` handles the orphan shape correctly once called — the fix is
@@ -297,7 +297,7 @@ def test_orphan_premise_is_form_pdf_false_but_widgets_present():
 
 
 def test_orphan_widget_value_redacted_from_text_and_bytes():
-    """The Session 660 leak class, closed at the engine: a burn over an
+    """The orphan-widget leak class, closed at the engine: a burn over an
     ORPHAN widget's rect removes the value from get_text() AND raw bytes,
     and no interactive widget survives anywhere in the output."""
     pdf = _make_orphan_widget_pdf()

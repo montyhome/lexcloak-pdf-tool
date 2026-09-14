@@ -5,7 +5,7 @@ cleartext bytes for in-memory storage; ``encrypt`` takes cleartext bytes and
 returns AES-256 password-protected bytes. Together they bracket the Lex Cloak
 pipeline -- decrypt on entry, encrypt on exit -- keeping every intermediate
 step (redaction, Spec 13/14 metadata + cover page, size reduction) operating on
-cleartext (Session 342).
+cleartext.
 
 Wrong-password on decrypt is an op-level error -- the caller can retry with a
 different password without restarting the process.

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "lexcloak-pdf-tool"
 # Version is sourced from ``lexcloak_pdf_tool.__version__`` (single source of
 # truth) via the ``[tool.setuptools.dynamic]`` block below, so the packaged
-# version and the CLI ``--version`` flag can never drift (Session 342).
+# version and the CLI ``--version`` flag can never drift.
 dynamic = ["version"]
 description = "AGPL-licensed PyMuPDF I/O wrapper used by Lex Cloak desktop. Communicates with the closed Lex Cloak app via length-prefixed JSON over stdin/stdout."
 readme = "README.md"

@@ -191,7 +191,7 @@ def test_is_encrypted_real_password():
     assert is_encrypted(_make_encrypted_pdf("secret123")) is True
 
 
-# ── encrypt (Session 342) ────────────────────────────────────────────
+# ── encrypt ──────────────────────────────────────────────────────────
 # The encrypt-on-exit half of the decrypt/encrypt pipeline bracket. Mirrors
 # reduce_size's cleartext-only invariant + apply_redactions's save-failure
 # fallback. Shares the AES-256 save block with apply_redactions via
@@ -462,11 +462,11 @@ def test_apply_redactions_tolerates_unknown_per_match_keys():
     assert "REDACTED" in text
 
 
-# ── apply_redactions: /Rotate geometry (Session 590) ───────────────────
+# ── apply_redactions: /Rotate geometry ─────────────────────────────────
 #
 # The app supplies match rects in as-rendered (rotation-applied) space, but
 # add_redact_annot interprets them in the page's native (unrotated) space.
-# Pre-S590, _apply_redactions_doc burned with no rotation transform, so on a
+# Before the fix, _apply_redactions_doc burned with no rotation transform, so on a
 # /Rotate page the box landed point-mirrored (180) / transposed (90, 270) and
 # the covered content stayed readable in the export. Privacy-grade. The fix
 # derotates each rect (+ a MediaBox-origin shift for cropped pages) before the
@@ -512,7 +512,7 @@ def test_apply_redactions_rotated_page_lands_in_as_rendered_space(rotation):
     out, _ = apply_redactions(pdf, matches)
     assert _is_dark_at(out, 0, 150, 120), (
         f"/Rotate {rotation}: redaction did not land on the supplied "
-        f"as-rendered region (pre-S590 it burned in unrotated space)"
+        f"as-rendered region (before the fix it burned in unrotated space)"
     )
     # A point well outside the supplied box stays clear — the box is localized,
     # not a whole-page smear.
@@ -616,7 +616,7 @@ def test_apply_redactions_active_categories_mixed_obeys_filter_and_bypass():
     assert "123-45-6789" not in _read_page_text(out, 1)
 
 
-# ── apply_redactions: blackout_pages (Session 592 triage redesign) ─────
+# ── apply_redactions: blackout_pages (triage redesign) ─────────────────
 #
 # A "dropped" page can have one of two outcomes: removed_pages deletes it
 # from the output; blackout_pages keeps it but covers it edge-to-edge in

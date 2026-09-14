@@ -1,6 +1,6 @@
-"""Extraction-based redaction goldens — Session 659.
+"""Extraction-based redaction goldens.
 
-The S590 rotated-page goldens assert PIXELS only, and pixels are exactly the
+The rotated-page goldens assert PIXELS only, and pixels are exactly the
 test shape that let a scrub gap survive: a black box can land perfectly while
 content under (or beyond) it stays extractable. These goldens pin the other
 half of the redaction contract on every ``/Rotate`` value and content shape:
@@ -12,7 +12,7 @@ half of the redaction contract on every ``/Rotate`` value and content shape:
   bytes, not merely overdrawn;
 * full-page blackout -> ZERO extractable chars, including glyphs hanging off
   the page box (clipped print headers whose descender slivers poke ~1-2pt
-  into the page — the Session 659 live-export survivor class);
+  into the page — the live-export survivor class);
 * page-edge match rects -> a rect flush against a page edge scrubs the
   clipped line beyond it (``_edge_overscan_strips``), while interior rects
   deliberately do NOT reach off-page.
@@ -208,7 +208,7 @@ def test_burned_value_gone_from_extraction(text_rotate, page_rotate):
 @pytest.mark.parametrize("page_rotate", [0, 90, 180, 270])
 @pytest.mark.parametrize("text_rotate", [0, 90])
 def test_burned_region_fill_lands_and_is_localized(text_rotate, page_rotate):
-    """The fill half (kept from the S590 pixel goldens): dark at the burned
+    """The fill half (kept from the rotated-page pixel goldens): dark at the burned
     region's displayed center, NOT dark at the control row."""
     pdf = _text_page_pdf(page_rotate, text_rotate)
     out, _ = apply_redactions(pdf, [_match(BURN_RECT[(text_rotate,
@@ -455,7 +455,7 @@ def test_image_region_destroyed_not_overdrawn(page_rotate):
 
 @pytest.mark.parametrize("page_rotate", [0, 90, 180, 270])
 def test_blackout_scrubs_edge_hanging_glyphs(page_rotate):
-    """The Session 659 live-export survivor class: a clipped print header
+    """The live-export survivor class: a clipped print header
     whose descender glyphs (p/y/g) + form furniture poke ~1.7pt into the
     page survives a page-bounds blackout region on both pymupdf lines.
     The blackout invariant is solid black AND zero extractable chars —

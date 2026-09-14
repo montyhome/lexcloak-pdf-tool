@@ -604,7 +604,7 @@ def test_protocol_version_v2_still_accepted():
 
 
 def test_protocol_version_v3_still_accepted():
-    """v3 clients (Session 291) keep working against a v4 subprocess."""
+    """v3 clients keep working against a v4 subprocess."""
     with CLISession() as s:
         s.write_frame({"protocol_version": 3, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf(n_pages=2))})
@@ -905,7 +905,7 @@ def test_decrypt_non_string_password_returns_value_error():
     assert "password" in resp["error"].lower()
 
 
-# ── encrypt (Session 342) ────────────────────────────────────────────
+# ── encrypt ──────────────────────────────────────────────────────────
 
 
 def test_encrypt_roundtrip_stateless():
@@ -1001,7 +1001,7 @@ def test_encrypt_handle_roundtrip_leaves_cached_doc_cleartext():
     assert followup["result"]["count"] == 2
 
 
-# ── --version flag (Session 342 / 354 rider) ─────────────────────────
+# ── --version flag ───────────────────────────────────────────────────
 # emit_compat_manifest.py in the closed app runs ``[binary, "--version"]`` and
 # parses the semver off STDOUT to verify the bundled subprocess matches the
 # pinned tag. These lock that contract (stdout-only, bare semver, exit 0, no

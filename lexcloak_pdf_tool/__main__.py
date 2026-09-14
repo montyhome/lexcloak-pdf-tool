@@ -5,11 +5,11 @@ JSON responses to stdout. See ``docs/PROTOCOL.md`` for the wire contract.
 
 Protocol versions
 -----------------
-* **v2** (Session 224 base): per-call ``pdf_b64`` -- subprocess re-parses
+* **v2**: per-call ``pdf_b64`` -- subprocess re-parses
   the PDF on every op. Stateless.
-* **v3** (Session 291): added ``all_page_sizes`` batch op. Otherwise
+* **v3**: added ``all_page_sizes`` batch op. Otherwise
   stateless -- still per-call ``pdf_b64``.
-* **v4** (Session 295): adds stateful handle protocol. ``open_doc`` parses
+* **v4**: adds stateful handle protocol. ``open_doc`` parses
   once and returns a handle UUID; per-page ops take ``handle`` instead of
   ``pdf_b64``. ``close_doc`` releases the cached document. Subprocess holds
   a parsed ``pymupdf.Document`` per handle, capped at ``_DOC_CACHE_MAX_SIZE``
@@ -1045,7 +1045,7 @@ def main() -> int:
     # ``--version`` short-circuit: print the package version to STDOUT and exit
     # before the length-prefixed JSON loop. The closed app's
     # ``emit_compat_manifest.py`` probes this to confirm the bundled subprocess
-    # matches the pinned tag (Session 354 + 342). STDOUT only, bare semver --
+    # matches the pinned tag. STDOUT only, bare semver --
     # the stderr startup banner below carries pymupdf_version and must never be
     # parsed as the app version (regression-locked downstream).
     if "--version" in sys.argv[1:]:

@@ -152,7 +152,7 @@ def _has_any_widget(doc) -> bool:
 
     ``doc.is_form_pdf`` alone false-negatives on CATALOG-ORPHAN widgets --
     page-level /Widget annotations never registered in a document /AcroForm
-    dictionary (form-filler / generator output; Session 660 found a whole
+    dictionary (form-filler / generator output; testing found a whole
     synthetic tax corpus orphan-shaped, and a live packaged-app export
     shipped all 46 widget values because the flatten guard skipped). Real
     authority-published forms register their fields and ARE seen by
@@ -333,7 +333,7 @@ _PAGE_EDGE_EPSILON = 1.0
 # margins) still extract via ``get_text`` when any sliver of the glyph pokes
 # into the page -- yet ``apply_redactions`` KEEPS a glyph whose overlap with
 # the redaction region is a sliver (empirically <~2pt of the glyph box, both
-# pymupdf 1.27.x and 1.28.x). Session 659 found live blackout exports with
+# pymupdf 1.27.x and 1.28.x). Testing found live blackout exports with
 # descender glyphs (p/y/g) + form furniture extractable from header lines
 # hanging ~1pt into the page. Extending the redaction region well past the
 # edge makes those glyphs fully contained, so the text filter removes them.
@@ -376,7 +376,7 @@ def _edge_overscan_strips(rect, page_rect) -> list:
 
 def _derotate_to_native(rect, page):
     """Map an as-rendered (rotation-applied) rect into the native frame
-    ``add_redact_annot`` expects -- the S590 two-step transform (derotation
+    ``add_redact_annot`` expects -- the two-step transform (derotation
     + MediaBox-origin shift). No-op frame-wise on an unrotated page; the
     caller guards on ``page.rotation``.
     """
@@ -406,7 +406,7 @@ def _save_encrypted(doc, password: str) -> tuple[bytes, bool]:
     Shared by ``_apply_redactions_doc`` (the library-back-compat re-encrypt
     path) and :func:`lexcloak_pdf_tool.encryption.encrypt` (the standalone
     ``encrypt`` op) so the two cannot drift on save params or fallback
-    behaviour (Session 342, Risk 2).
+    behaviour.
     """
     buf = io.BytesIO()
     try:
@@ -447,7 +447,7 @@ def _apply_redactions_doc(doc, matches: list[dict],
     the v0.4.0 stateful handle protocol.
 
     ``removed_pages`` vs ``blackout_pages`` are the two "drop" outcomes a page
-    can have (Session 592 triage redesign): a removed page is deleted from the
+    can have (since the triage redesign): a removed page is deleted from the
     output; a blackout page stays in the output but is covered edge-to-edge in
     solid black with its underlying text/images SCRUBBED (a true redaction, not
     a cosmetic draw -- nothing extractable survives). A blackout never depends
@@ -500,7 +500,7 @@ def _apply_redactions_doc(doc, matches: list[dict],
             # Off-page scrub strips for rects flush against a page edge --
             # computed in the as-rendered frame BEFORE derotation so the
             # flush test runs against the same box the app's rects live in
-            # (Session 659; see _edge_overscan_strips).
+            # (see _edge_overscan_strips).
             strips = _edge_overscan_strips(rect, page_rect)
             # Match rects arrive in the app's as-rendered (rotation-applied)
             # space -- the frame render_page / page_size / OCR geometry all
@@ -509,13 +509,12 @@ def _apply_redactions_doc(doc, matches: list[dict],
             # ``/Rotate`` page an untransformed burn lands displaced
             # (point-mirrored at 180, transposed at 90/270) -- privacy-grade
             # on the landscape legal / medical pages that carry rotation
-            # flags. ``_derotate_to_native`` is the S590 two-step transform
+            # flags. ``_derotate_to_native`` is the two-step transform
             # (derotation + MediaBox-origin shift), pinned by affine-fit /
             # invert ground truth against the strict goldens -- see its
             # docstring. ``font_size`` keeps the as-rendered ``box_h`` so the
-            # label tracks the visible box. Root-caused S514; fixed S590;
-            # extraction-verified (fill AND text-scrub, both pymupdf lines)
-            # S659.
+            # label tracks the visible box. Extraction-verified (fill AND
+            # text-scrub, both pymupdf lines).
             if page.rotation:
                 rect = _derotate_to_native(rect, page)
                 strips = [_derotate_to_native(s, page) for s in strips]
@@ -545,15 +544,15 @@ def _apply_redactions_doc(doc, matches: list[dict],
                 page.add_redact_annot(rect, fill=(0, 0, 0))
         page.apply_redactions()
 
-    # Full-page blackout (Session 592): cover each blackout page edge-to-edge
+    # Full-page blackout: cover each blackout page edge-to-edge
     # in solid black and SCRUB the content beneath it. Runs before the
     # ``removed_set`` delete so both operate on original page indices, and on
     # the disjoint page set the per-match loop skipped (blackout pages are
     # excluded from ``by_page``), so no page gets ``apply_redactions`` twice.
     # The cover rect is the full *displayed* page mapped into native
-    # (add_redact_annot) space via the same S590-pinned derotation as the
+    # (add_redact_annot) space via the same pinned derotation as the
     # per-match path, then inflated ``_EDGE_OVERSCAN`` past every edge
-    # (Session 659): content drawn OUTSIDE the page box -- clipped print
+    # because content drawn OUTSIDE the page box -- clipped print
     # headers/footers -- pokes sliver glyphs into the page that extract via
     # ``get_text`` yet survive a page-bounds redaction region (the text
     # filter keeps sliver-overlap glyphs). The inflated region fully contains

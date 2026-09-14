@@ -25,9 +25,8 @@ import pymupdf as _pymupdf
 from .redact import open_pdf
 
 
-# Verbatim copy from ~/redact/.research/accuracy-disclaimer-drafts.md
-# lines 326-332. Do NOT paraphrase -- the prompt's Constraints section
-# names "verbatim Spec-13/14 strings" as a launch invariant.
+# Verbatim copy of the approved disclaimer strings. Do NOT paraphrase --
+# they are a launch invariant and must match the app's copy word for word.
 _COVER_PAGE_TITLE = "Redacted document — review required"
 _COVER_PAGE_BODY_TEMPLATE = (
     "This PDF was processed with Lex Cloak auto-redaction on {date}. "
