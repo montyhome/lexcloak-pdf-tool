@@ -12,7 +12,7 @@ half of the redaction contract on every ``/Rotate`` value and content shape:
   bytes, not merely overdrawn;
 * full-page blackout -> ZERO extractable chars, including glyphs hanging off
   the page box (clipped print headers whose descender slivers poke ~1-2pt
-  into the page — the live-export survivor class);
+  into the page — the edge-sliver class);
 * page-edge match rects -> a rect flush against a page edge scrubs the
   clipped line beyond it (``_edge_overscan_strips``), while interior rects
   deliberately do NOT reach off-page.
@@ -455,7 +455,7 @@ def test_image_region_destroyed_not_overdrawn(page_rotate):
 
 @pytest.mark.parametrize("page_rotate", [0, 90, 180, 270])
 def test_blackout_scrubs_edge_hanging_glyphs(page_rotate):
-    """The live-export survivor class: a clipped print header
+    """The edge-sliver class: a clipped print header
     whose descender glyphs (p/y/g) + form furniture poke ~1.7pt into the
     page survives a page-bounds blackout region on both pymupdf lines.
     The blackout invariant is solid black AND zero extractable chars —

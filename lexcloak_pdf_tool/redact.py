@@ -152,9 +152,9 @@ def _has_any_widget(doc) -> bool:
 
     ``doc.is_form_pdf`` alone false-negatives on CATALOG-ORPHAN widgets --
     page-level /Widget annotations never registered in a document /AcroForm
-    dictionary (form-filler / generator output; testing found a whole
-    synthetic tax corpus orphan-shaped, and a live packaged-app export
-    shipped all 46 widget values because the flatten guard skipped). Real
+    dictionary (form-filler and generator output take this shape, and the
+    old flatten guard skipped them, leaving every widget value in the
+    export). Real
     authority-published forms register their fields and ARE seen by
     ``is_form_pdf``; the orphan shape is the residual exposure class.
     ``doc.bake`` flattens orphan widgets correctly once actually called
@@ -195,7 +195,7 @@ def _flatten_form_fields(doc) -> None:
     overwhelmingly-common no-widget PDF takes the identical,
     byte-for-byte-unchanged path. The scan half exists because
     ``is_form_pdf`` false-negatives on catalog-orphan widgets (v0.6.2,
-    Sessions 659/660 -- see ``_has_any_widget``); ``is_form_pdf`` runs first
+    see ``_has_any_widget``); ``is_form_pdf`` runs first
     as the cheap short-circuit for well-formed forms. ``annots=False``
     leaves non-widget annotations untouched -- annotation-borne text is a
     distinct surface, out of scope for this AcroForm fix.
@@ -333,7 +333,7 @@ _PAGE_EDGE_EPSILON = 1.0
 # margins) still extract via ``get_text`` when any sliver of the glyph pokes
 # into the page -- yet ``apply_redactions`` KEEPS a glyph whose overlap with
 # the redaction region is a sliver (empirically <~2pt of the glyph box, both
-# pymupdf 1.27.x and 1.28.x). Testing found live blackout exports with
+# pymupdf 1.27.x and 1.28.x). A page-bounds blackout therefore leaves
 # descender glyphs (p/y/g) + form furniture extractable from header lines
 # hanging ~1pt into the page. Extending the redaction region well past the
 # edge makes those glyphs fully contained, so the text filter removes them.
