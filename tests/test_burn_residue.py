@@ -312,7 +312,7 @@ def test_freetext_is_visible_to_detection_yet_survived_before_the_fix():
     unlike a sticky note, a /FreeText's text IS returned by get_text, so a
     match is produced and the user is shown a box -- while the text lives
     in the annot's appearance stream, outside what apply_redactions
-    rewrites. Same failure shape as the S660 widget /V leak."""
+    rewrites. Same failure shape as the orphan widget /V leak."""
     doc = pymupdf.open(stream=_make_residue_pdf(), filetype="pdf")
     try:
         page_text = doc[0].get_text()

@@ -1,6 +1,6 @@
 """Regression: Tesseract hOCR invocation must not use the ``hocr`` configfile.
 
-Session 617 / 625: requesting hOCR via the bare ``hocr`` configfile argument
+Requesting hOCR via the bare ``hocr`` configfile argument
 makes Tesseract read ``<datadir>/configs/hocr`` — a filesystem lookup the
 bundled Windows tessdata layout cannot resolve. On failure Tesseract prints
 ``read_params_file: Can't open hocr``, EXITS 0, and emits an empty hOCR
@@ -36,7 +36,7 @@ def test_hocr_argv_uses_c_params_not_configfile():
     # The bare configfile token (the bug) must be absent.
     assert "hocr" not in argv, (
         "bare 'hocr' configfile arg reintroduced — silently empties OCR on "
-        "bundled Windows (Session 617)")
+        "bundled Windows")
     # hOCR must be requested via the explicit -c params instead.
     assert "tessedit_create_hocr=1" in argv
     assert "hocr_font_info=0" in argv

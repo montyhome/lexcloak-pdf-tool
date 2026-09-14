@@ -422,7 +422,7 @@ def _tesseract_hocr_argv(binary: str, tessdata_path: str, psm: int) -> list[str]
     ``read_params_file: Can't open hocr`` to stderr, EXITS 0, and emits an
     empty hOCR skeleton -- which slips past the returncode and empty-stdout
     guards in :func:`_run_tesseract`, parses to zero lines, and returns an
-    empty page SILENTLY. Session 617 fixed the closed app's in-repo OCR path
+    empty page SILENTLY. The closed app's in-repo OCR path was fixed first
     (``app/rules/ocr.py``); this is the matching fix for the AGPL subprocess
     ``extract_text_ocr`` cold path used by structured-text / Export-Text
     redaction + diagnostics. The two ``-c`` params are exactly the two lines of
