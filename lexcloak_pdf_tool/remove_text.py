@@ -79,9 +79,8 @@ def _matches(word: dict, item: dict) -> bool:
     for field in ("text", "mode", "layer"):
         if field in item and item[field] != word[field]:
             return False
-    if "opacity" in item and abs(float(item["opacity"]) - word["opacity"]) > 1e-3:
-        return False
-    return True
+    return not ("opacity" in item
+                and abs(float(item["opacity"]) - word["opacity"]) > 1e-3)
 
 
 def _band(page, box, share: float):

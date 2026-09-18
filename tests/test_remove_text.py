@@ -84,9 +84,9 @@ def _hidden(**insert_kw) -> bytes:
 
 
 VECTORS = {
-    "white": dict(color=(1, 1, 1)),
-    "invisible": dict(render_mode=3),
-    "transparent": dict(fill_opacity=0),
+    "white": {"color": (1, 1, 1)},
+    "invisible": {"render_mode": 3},
+    "transparent": {"fill_opacity": 0},
 }
 
 
