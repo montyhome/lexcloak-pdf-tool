@@ -51,6 +51,7 @@ as a clean exit.
        | "is_encrypted" | "get_metadata" | "decrypt" | "encrypt"
        | "open_doc" | "close_doc" | "open_doc_path"
        | "extract_pages" | "extract_pages_h"
+       | "trace_text" | "trace_text_h"
        | "render_h" | "extract_native_h" | "extract_ocr_h"
        | "extract_text_dict_h" | "extract_text_plain_h"
        | "search_for_h" | "apply_redactions_h" | "strip_metadata_h"
@@ -203,6 +204,58 @@ Tesseract OCR plus character coordinates and per-line spans.
 
 Returns `null` (not an error) when Tesseract is unavailable or OCR fails.
 Callers should fall back to native-text extraction.
+
+### `trace_text`  *(v7+)*
+
+Every word the page's content carries, with how it is drawn. The opposite
+question to `extract_text_plain`: that op reports the text a viewer sees and
+therefore leaves out text outside the page, text in optional-content groups
+that are switched off, and glyphs removed by a clipping path. This op reports
+all of it, with the facts a caller needs to compare each word against a
+render of the page. It makes no judgement about visibility itself.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required |
+| `page` | int | `0` |
+
+**Result:**
+```json
+{
+  "rect": [x0, y0, x1, y1],
+  "rotation": int,
+  "image_cover": float,
+  "words": [
+    {"text": str, "bbox": [x0, y0, x1, y1], "size": float,
+     "mode": int, "opacity": float, "layer": str, "layer_off": bool,
+     "clipped": bool, "covered_by": "image" | "path" | null}
+  ]
+}
+```
+
+- `rect` and every `bbox` are in the **rotated** page frame (`page.rect`), the
+  frame a render of the page uses. `rotation` is the page's `/Rotate`.
+- `mode` is the text render mode (0 fill, 1 stroke, 2 fill+stroke,
+  3 invisible, 4–7 the same with clipping).
+- `opacity` is the fill alpha in effect for the word.
+- `layer` is the optional-content group the word belongs to (`""` for none),
+  and `layer_off` says whether that group is off in the document's current
+  configuration. Words in switched-off groups are included; the op switches
+  such groups on through the UI configuration while it reads, and restores
+  the configuration before returning, so a handle's later renders are
+  unchanged.
+- `clipped` is true when no character of the word appears in MuPDF's
+  clip-respecting extraction: it lies outside a clipping path or outside the
+  page. Characters are matched by character and origin.
+- `covered_by` is `"path"` or `"image"` when a fill or image drawn **later**
+  covers at least 80% of the word's span box, else `null`. Whether the cover
+  is opaque, and whether it depicts the word (as a page scan does over its own
+  text layer), is for the caller to judge from a render.
+- `image_cover` is the share of the page area covered by image draws, summed
+  and capped at 1.0 — about 1.0 on a typical scanned page.
+
+Words are split on whitespace within each span, in content-stream order.
+`IndexError` for a page out of range.
 
 ### `extract_text_dict`
 
@@ -548,6 +601,7 @@ The following ops accept `handle` (string, required) instead of `pdf_b64`:
 | `extract_ocr` | `extract_ocr_h` | `{...}` or `null` |
 | `extract_text_dict` | `extract_text_dict_h` | `{"blocks": [...]}` |
 | `extract_text_plain` | `extract_text_plain_h` | `{"text": str}` |
+| `trace_text` | `trace_text_h` | `{"rect": [...], "rotation": int, "image_cover": float, "words": [...]}` |
 | `search_for` | `search_for_h` | `{"rects": [...]}` |
 | `apply_redactions` | `apply_redactions_h` | `{"pdf_b64": str, "protection_applied": bool}` |
 | `strip_metadata` | `strip_metadata_h` | `{"pdf_b64": str}` |
@@ -638,4 +692,5 @@ shipping client has caught up.
 | 0.6.5 | 4 | No new ops, no wire-surface change. (1) `apply_redactions` accepts an optional per-match `redact_label` overriding the document-level label for that box; absent/empty falls back, so a label-free payload is byte-identical to 0.6.3 (verified A/B across three document-label shapes, modulo the random trailer `/ID`). (2) `search_whole_word_in_chars` gains a keyword-only `numeric_token_boundary=False`: when True, a numeric-shaped needle no longer matches inside a longer number through an intra-number separator (`12` in `18-12-107.5`). **The default is the historical behavior**, so no existing caller changes — including the `search_for` op, whose `whole_word=True` path is untouched. Alpha and mixed needles are unaffected either way. The flag exists because whether a numeric fragment is noise depends on the needle's provenance, which only the caller knows: detector-inferred needles want it True, human-typed needles want it False. |
 | 0.6.7 | 4 | No new ops, no wire-surface change — frames are byte-identical to 0.6.6. Retires the deprecated `fitz` alias: the package and its tests now `import pymupdf`. `fitz` is a `from pymupdf import *` shim, so every name this package uses resolves to the identical object (verified against PyMuPDF 1.27.2.3 and 1.28.2) — but `import fitz` writes a deprecation warning to **stdout** at import time on 1.28.2+, and stdout is this protocol's frame channel. An import-time write lands ahead of every in-process mitigation, so not importing the alias is the only fix that reaches it. PyMuPDF also states the alias will be removed in a future release, which would make the subprocess unstartable. `PROTOCOL_VERSION` stays 4; the supported set stays {2, 3, 4}. |
 | 0.7.0 | **6** | Adds `extract_pages` (+ `extract_pages_h`) — page-range split with re-based bookmarks, backing the closed app's scan-cost preflight "split into scannable parts" offer — **and `open_doc_path`**, a handle opened from a filesystem path so concurrent readers share one mmap instead of each holding a private copy. Both ops landed under v6 before 0.7.0 was released, so no shipped binary ever advertised 6 with only one of them; once 0.7.0 ships, a further op needs v7. Bumps the protocol so a client can capability-gate the split offer from the startup banner instead of discovering an unknown op mid-flow. The supported set widens to {2, 3, 4, 5, 6}; every existing client is unaffected. |
+| 0.8.0 | **7** | Adds `trace_text` (+ `trace_text_h`): every word a page carries, with its render mode, fill opacity, optional-content group and state, whether it survives clip-respecting extraction, and whether a later fill or image covers it, all in the rotated page frame. It lets a client compare a page's text content against a render of the page. Additive; the supported set widens to {2, 3, 4, 5, 6, 7}, so every existing client is unaffected. |
 | 0.6.8 | **5** | Adds `render_clip` and `list_annotations` (v5+). **Bumps the protocol version, departing from the additive-no-bump precedent set at 0.6.0/0.6.3** — deliberately. Those additions were optional enhancements a client could simply not call; these two back a closed-app export-integrity gate that fails CLOSED, so a client built against them has no safe degraded mode. Advertising 5 lets that client detect an too-old subprocess from the startup banner and refuse to start, instead of discovering it as a per-export refusal once a user is mid-document. The supported set widens to {2, 3, 4, 5}, so every existing client — including the closed app, which declares 2 on stateless calls — is unaffected. |
