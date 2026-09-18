@@ -466,6 +466,24 @@ def _op_search_for(cmd: dict) -> dict:
     }
 
 
+def _redaction_result(out_bytes: bytes, protection_applied: bool,
+                      remove_text, removal: dict) -> dict:
+    """Response for both apply_redactions ops.
+
+    ``text_removal`` is present exactly when the request carried
+    ``remove_text`` (v7), so a client can tell "removed nothing" from "this
+    subprocess ignored the field".
+    """
+    result = {
+        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        "protection_applied": bool(protection_applied),
+    }
+    if remove_text is not None:
+        result["text_removal"] = {"removed": removal.get("removed", []),
+                                  "kept": removal.get("kept", [])}
+    return result
+
+
 def _op_apply_redactions(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     matches = cmd.get("matches") or []
@@ -474,6 +492,8 @@ def _op_apply_redactions(cmd: dict) -> dict:
     removed_pages = cmd.get("removed_pages")
     blackout_pages = cmd.get("blackout_pages")
     output_protection = cmd.get("output_protection")
+    remove_text = cmd.get("remove_text")
+    removal: dict = {}
     out_bytes, protection_applied = apply_redactions(
         pdf_bytes,
         matches,
@@ -482,11 +502,10 @@ def _op_apply_redactions(cmd: dict) -> dict:
         removed_pages=removed_pages,
         blackout_pages=blackout_pages,
         output_protection=output_protection,
+        remove_text=remove_text,
+        removal_sink=removal,
     )
-    return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
-        "protection_applied": bool(protection_applied),
-    }
+    return _redaction_result(out_bytes, protection_applied, remove_text, removal)
 
 
 def _op_strip_metadata(cmd: dict) -> dict:
@@ -793,6 +812,8 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
     removed_pages = cmd.get("removed_pages")
     blackout_pages = cmd.get("blackout_pages")
     output_protection = cmd.get("output_protection")
+    remove_text = cmd.get("remove_text")
+    removal: dict = {}
     out_bytes, protection_applied = _apply_redactions_doc(
         doc, matches,
         redact_label=redact_label,
@@ -800,11 +821,10 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
         removed_pages=removed_pages,
         blackout_pages=blackout_pages,
         output_protection=output_protection,
+        remove_text=remove_text,
+        removal_sink=removal,
     )
-    return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
-        "protection_applied": bool(protection_applied),
-    }
+    return _redaction_result(out_bytes, protection_applied, remove_text, removal)
 
 
 def _op_strip_metadata_h(cmd: dict) -> dict:
