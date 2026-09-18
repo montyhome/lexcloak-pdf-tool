@@ -228,7 +228,7 @@ render of the page. It makes no judgement about visibility itself.
   "words": [
     {"text": str, "bbox": [x0, y0, x1, y1], "size": float,
      "mode": int, "opacity": float, "layer": str, "layer_off": bool,
-     "clipped": bool, "covered_by": "image" | "path" | null}
+     "clipped": bool, "covered_by": "image" | "path" | null, "span": int}
   ]
 }
 ```
@@ -251,6 +251,8 @@ render of the page. It makes no judgement about visibility itself.
   covers at least 80% of the word's span box, else `null`. Whether the cover
   is opaque, and whether it depicts the word (as a page scan does over its own
   text layer), is for the caller to judge from a render.
+- `span` is the drawing sequence number of the text span the word came from;
+  words sharing it were drawn by one text-showing run, in any page rotation.
 - `image_cover` is the share of the page area covered by image draws, summed
   and capped at 1.0 — about 1.0 on a typical scanned page.
 

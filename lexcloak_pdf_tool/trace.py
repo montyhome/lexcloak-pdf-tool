@@ -19,6 +19,10 @@ Each word carries only facts read from the PDF's own drawing instructions:
   LATER covers at least ``COVER_FRACTION`` of the word's span; else ``None``.
 * ``bbox`` -- in the ROTATED page frame (``page.rect``), the frame a render
   of the page uses, so a caller can index pixels with it directly.
+* ``span`` -- the drawing sequence number of the text span the word came from.
+  Words sharing it were drawn by one text-showing run, whatever the page's
+  rotation, so a caller can regroup words into runs without guessing a line
+  direction from box shapes.
 
 The page result also carries ``image_cover``: the share of the page area
 covered by image draws (1.0 for a typical scanned page).
@@ -151,6 +155,7 @@ def _trace_text_doc(doc, page_num: int) -> dict:
                     "layer_off": bool(layer) and layer in off_names,
                     "clipped": not any(k in drawn for k in keys),
                     "covered_by": covered_by,
+                    "span": int(seq),
                 })
         return {
             "rect": [float(v) for v in rect],

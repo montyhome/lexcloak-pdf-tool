@@ -51,6 +51,19 @@ def test_plain_text_is_mode_0_opaque_unclipped_uncovered():
     assert out["rect"] == [0.0, 0.0, 612.0, 792.0]
     assert out["rotation"] == 0
     assert out["image_cover"] == 0.0
+    # One insert_text call is one text-showing run.
+    assert words["alpha"]["span"] == words["beta"]["span"]
+
+
+def test_words_from_separate_runs_carry_separate_span_numbers():
+    doc, page = _doc()
+    page.insert_text((72, 100), "first run", fontsize=12)
+    page.insert_text((72, 140), "second run", fontsize=12)
+    out = trace_text(_bytes(doc), 0)
+    spans = [w["span"] for w in out["words"]]
+    assert spans[0] == spans[1]
+    assert spans[2] == spans[3]
+    assert spans[1] < spans[2]
 
 
 def test_render_mode_3_is_reported_and_not_clipped():
