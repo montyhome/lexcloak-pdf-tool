@@ -69,10 +69,6 @@ def _page_words(page) -> list[dict]:
     return words
 
 
-def _all_keys(page) -> Counter:
-    return Counter(k for w in _page_words(page) for k in w["keys"])
-
-
 def _matches(word: dict, item: dict) -> bool:
     if any(abs(a - b) > MATCH_TOL for a, b in zip(word["bbox"], item["box"], strict=True)):
         return False
