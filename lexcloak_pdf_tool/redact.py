@@ -435,7 +435,9 @@ def _apply_redactions_doc(doc, matches: list[dict],
                           removed_pages: list[int] | None = None,
                           blackout_pages: list[int] | None = None,
                           *,
-                          output_protection: dict | None = None
+                          output_protection: dict | None = None,
+                          remove_text: list | None = None,
+                          removal_sink: dict | None = None,
                           ) -> tuple[bytes, bool]:
     """Apply redactions to an open ``pymupdf.Document`` and return (bytes, protected).
 
@@ -461,8 +463,18 @@ def _apply_redactions_doc(doc, matches: list[dict],
     pass -- the label is a per-annotation property, so per-match labels cost
     nothing beyond the dict lookup (the rejected alternative was one burn
     pass per distinct label, which would multiply the dominant export cost).
+
+    ``remove_text`` (v0.8.0) is an optional list of ``{"page": int, "box":
+    [x0, y0, x1, y1]}`` in the as-rendered frame: text inside each box is
+    removed with no fill and no change to images or graphics, before the
+    matches are burned (see ``remove_text.py``). The outcome -- which boxes
+    were removed and which had to be kept -- is written to ``removal_sink``.
     """
+    from .remove_text import remove_text_doc, validate_remove_text
+
     _validate_redaction_payload(matches, removed_pages, blackout_pages)
+    removal_plan = (validate_remove_text(remove_text)
+                    if remove_text is not None else None)
     # Flatten form fields BEFORE redacting: a widget /V survives a redaction
     # box otherwise (see _flatten_form_fields). No-op for non-form PDFs.
     _flatten_form_fields(doc)
@@ -473,6 +485,11 @@ def _apply_redactions_doc(doc, matches: list[dict],
     blackout_set = (set(blackout_pages) - removed_set) if blackout_pages else set()
     # `[]` means caller turned every category off — must NOT collapse to None.
     active_set = set(active_categories) if active_categories is not None else None
+    if removal_plan is not None:
+        outcome = remove_text_doc(doc, removal_plan,
+                                  skip_pages=removed_set | blackout_set)
+        if removal_sink is not None:
+            removal_sink.update(outcome)
     by_page: dict[int, list[dict]] = {}
     for m in matches:
         if not m.get("enabled", True):
@@ -610,7 +627,9 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
                      removed_pages: list[int] | None = None,
                      blackout_pages: list[int] | None = None,
                      *,
-                     output_protection: dict | None = None
+                     output_protection: dict | None = None,
+                     remove_text: list | None = None,
+                     removal_sink: dict | None = None,
                      ) -> tuple[bytes, bool]:
     """Black-box redact enabled matches, return (new PDF bytes, protection_applied).
 
@@ -674,6 +693,8 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
             removed_pages=removed_pages,
             blackout_pages=blackout_pages,
             output_protection=output_protection,
+            remove_text=remove_text,
+            removal_sink=removal_sink,
         )
     finally:
         doc.close()
