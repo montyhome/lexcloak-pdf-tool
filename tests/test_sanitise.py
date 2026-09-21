@@ -567,6 +567,28 @@ def test_touched_pages_follow_removed_pages_so_the_right_tag_is_stripped():
     assert len(pymupdf.open(stream=out, filetype="pdf")) == 2
 
 
+def test_a_page_where_only_hidden_text_was_removed_counts_as_touched():
+    """No burn box on the page: the only redaction is a text-only removal."""
+    from lexcloak_pdf_tool.trace import trace_text
+    d = pymupdf.open()
+    page = d.new_page(width=612, height=792)
+    page.insert_text((60, 300), "quietword", fontsize=12, render_mode=3)
+    page.insert_font(fontname="helv")
+    page.clean_contents()
+    x = page.get_contents()[0]
+    d.update_stream(x, d.xref_stream(x)
+                    + b"\nBT /helv 12 Tf 60 150 Td /Span <</ActualText (onlytagmark)>>"
+                      b" BDC (visible) Tj EMC ET\n")
+    src = _bytes(d)
+    assert _readable(src, "quietword") and _readable(src, "onlytagmark")
+    word = next(w for w in trace_text(src, 0)["words"] if w["text"] == "quietword")
+    out, _ = apply_redactions(src, [], remove_text=[{
+        "page": 0, "box": word["bbox"], "text": "quietword",
+        "mode": word["mode"], "opacity": word["opacity"], "layer": word["layer"]}])
+    assert not _readable(out, "quietword")            # the removal really ran
+    assert not _readable(out, "onlytagmark")
+
+
 def test_a_blackout_page_counts_as_touched():
     src = _doc_with_extra_actualtext("blackoutmark")
     out, _ = apply_redactions(src, [], blackout_pages=[0])
