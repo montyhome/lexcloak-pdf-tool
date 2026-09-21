@@ -590,9 +590,16 @@ def test_a_page_where_only_hidden_text_was_removed_counts_as_touched():
 
 
 def test_a_blackout_page_counts_as_touched():
-    src = _doc_with_extra_actualtext("blackoutmark")
+    """The blackout scrubs the page's own content, so a content-stream tag goes
+    regardless. A structure element that points at the page is what only the
+    touched-page set reaches."""
+    assert not _readable(
+        apply_redactions(_doc_with_extra_actualtext("blackoutmark"), [],
+                         blackout_pages=[0])[0], "blackoutmark")
+    src = _struct_pdf("altmark-blackout", tag_page=0)
+    assert _readable(src, "altmark-blackout")
     out, _ = apply_redactions(src, [], blackout_pages=[0])
-    assert not _readable(out, "blackoutmark")
+    assert not _readable(out, "altmark-blackout")
 
 
 def test_a_tag_in_a_form_xobject_drawn_on_a_burned_page_is_stripped():
