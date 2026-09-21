@@ -6,7 +6,7 @@ import logging
 
 import pymupdf as _pymupdf
 
-from .sanitise import sanitise_document, strip_extra_metadata
+from .sanitise import drop_javascript_names, sanitise_document, strip_extra_metadata
 
 PDF_ENCRYPT_AES_256 = _pymupdf.PDF_ENCRYPT_AES_256
 PDF_PERM_ACCESSIBILITY = _pymupdf.PDF_PERM_ACCESSIBILITY
@@ -326,7 +326,7 @@ def _scrub_residue(doc, touched_pages=None) -> None:
     # the /Names/JavaScript name tree in place -- and its NAMES are author
     # chosen, so a script named for a matter or custodian would ride out in
     # a document that is supposed to carry nothing along. Drop the tree.
-    doc.xref_set_key(doc.pdf_catalog(), "Names/JavaScript", "null")
+    drop_javascript_names(doc)
 
     # Everything else a delivered file can carry outside its visible content:
     # actions, associated files, image description segments, and tagged text on

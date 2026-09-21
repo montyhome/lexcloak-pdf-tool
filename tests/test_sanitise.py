@@ -901,6 +901,44 @@ def test_standard_metadata_stamped_after_an_info_dictionary_was_replaced_survive
     assert not _readable(out, META)
 
 
+def _js_name_tree(indirect: bool) -> bytes:
+    """A JavaScript name tree whose entry NAME is the marker. With ``indirect``
+    the ``/Names`` dictionary is its own object, as in many real documents."""
+    d = _doc()
+    js = d.get_new_xref()
+    d.update_object(js, "<</S/JavaScript/JS (var x=1;)>>")
+    names = f"<</JavaScript <</Names [(namesmark) {js} 0 R]>>>>"
+    if indirect:
+        nx = d.get_new_xref()
+        d.update_object(nx, names)
+        d.xref_set_key(d.pdf_catalog(), "Names", f"{nx} 0 R")
+    else:
+        d.xref_set_key(d.pdf_catalog(), "Names", names)
+    return _bytes(d)
+
+
+@pytest.mark.parametrize("indirect", [False, True], ids=["inline", "indirect"])
+def test_the_javascript_name_tree_is_removed_whether_or_not_names_is_its_own_object(indirect):
+    """Measured on 11 of 268 real documents: an indirect ``/Names`` made the
+    old key-path write raise, so the whole export failed."""
+    src = _js_name_tree(indirect)
+    assert _readable(src, "namesmark")
+    out = _burn(src)                                    # must not raise
+    assert not _readable(out, "namesmark")
+    assert SSN not in _text(out)
+    assert residue_report_pdf(out)["active_content"] == 0
+
+
+def test_the_report_counts_a_live_javascript_name_tree():
+    assert residue_report_pdf(_js_name_tree(True))["active_content"] >= 1
+    assert residue_report_pdf(_js_name_tree(False))["active_content"] >= 1
+
+
+def test_reduce_size_also_removes_the_javascript_name_tree():
+    out, _info = reduce_size(_js_name_tree(True))
+    assert not _readable(out, "namesmark")
+
+
 def test_a_catalog_key_that_cannot_be_addressed_is_left_and_reported_not_fatal():
     d = _doc()
     _with_object_text_key(d, d.pdf_catalog(), "/Odd#20Key (spacemark)")

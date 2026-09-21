@@ -138,6 +138,37 @@ def _catalog(doc) -> int:
 # ── active content ──────────────────────────────────────────────────────
 
 
+def _names_target(doc) -> tuple[int, str] | None:
+    """Where the catalog's ``/Names`` dictionary lives, as ``(xref, key)``.
+
+    A key path through an indirect object is rejected by PyMuPDF ("path to
+    'JavaScript' has indirects"), which made the whole export fail on any
+    document whose ``/Names`` is its own object. That is common: this was
+    measured on 11 of 268 real documents. So an indirect ``/Names`` is set on
+    its own object, and an inline one through the catalog.
+    """
+    cat = _catalog(doc)
+    kind, value = _key_text(doc, cat, "Names")
+    if kind == "xref":
+        return int(value.split()[0]), "JavaScript"
+    if kind == "dict":
+        return cat, "Names/JavaScript"
+    return None
+
+
+def drop_javascript_names(doc) -> None:
+    """Remove the ``/Names`` JavaScript name tree, whose entry names are author
+    chosen (``scrub(javascript=True)`` empties the bodies and leaves the tree)."""
+    target = _names_target(doc)
+    if target is not None:
+        _null(doc, *target)
+
+
+def _javascript_names_live(doc) -> bool:
+    target = _names_target(doc)
+    return target is not None and _key_text(doc, *target)[0] != "null"
+
+
 #: What may run by itself when a document opens: only a go-to. A file that
 #: opens a web page or changes the view on load is active content.
 KEPT_OPEN_ACTIONS = frozenset({"GoTo"})
@@ -168,6 +199,9 @@ def strip_active_content(doc) -> int:
     which carry no ``/S`` action type and are left alone.
     """
     removed = 0
+    if _javascript_names_live(doc):
+        drop_javascript_names(doc)
+        removed += 1
     for xref in range(1, doc.xref_length()):
         text = _object_text(doc, xref)
         if not text or ("/A" not in text and "/OpenAction" not in text):
@@ -638,6 +672,8 @@ def residue_report(doc, touched_pages: set[int] | None = None) -> dict:
         "piece_info": 0, "unknown_keys": 0, "associated_files": 0,
         "image_metadata": _count_image_segments(doc), "tagged_text": 0,
     }
+    if _javascript_names_live(doc):
+        report["active_content"] += 1
     info_kind, info_val = _key_text(doc, -1, "Info")
     if info_kind == "xref":
         info = int(info_val.split()[0])
