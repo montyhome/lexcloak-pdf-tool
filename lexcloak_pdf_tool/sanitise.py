@@ -94,7 +94,18 @@ def _key_text(doc, xref: int, key: str) -> tuple[str, str]:
 
 
 def _null(doc, xref: int, key: str) -> None:
-    doc.xref_set_key(xref, key, "null")
+    """Remove ``key`` from ``xref``, or leave it exactly as it was.
+
+    PyMuPDF rejects some legal key spellings (a name containing a space, for
+    one). An export must not die over a key it cannot name, so the failure is
+    logged and the key stays; ``residue_report`` then counts it, which is how
+    the caller finds out.
+    """
+    try:
+        doc.xref_set_key(xref, key, "null")
+    except (ValueError, RuntimeError) as exc:
+        logger.warning("could not remove a key (%s); left in place",
+                       type(exc).__name__)
 
 
 def _live_keys(doc, xref: int) -> list[str]:
@@ -194,10 +205,15 @@ def strip_extra_metadata(doc) -> int:
     info_kind, info_val = _key_text(doc, -1, "Info")
     if info_kind == "xref":
         info = int(info_val.split()[0])
-        for key in doc.xref_get_keys(info):
-            if key not in STANDARD_INFO_KEYS:
-                _null(doc, info, key)
-                removed += 1
+        extra = [k for k in _live_keys(doc, info) if k not in STANDARD_INFO_KEYS]
+        if extra:
+            # Replace the dictionary rather than null keys one by one: a
+            # custom key can carry a name PyMuPDF cannot address (``Form
+            # fields``, with a space, is real), and the standard keys are
+            # already blank by the time this runs. A caller that stamps
+            # standard fields afterwards adds them back to the empty dict.
+            doc.update_object(info, "<<>>")
+            removed += len(extra)
 
     cat = _catalog(doc)
     for key in _live_keys(doc, cat):

@@ -862,3 +862,51 @@ def test_an_incremental_update_keeps_no_earlier_revision():
         src = path.read_bytes()
     assert _readable(src, META)                        # rev 1 is in the bytes
     assert not _readable(_burn(src), META)
+
+
+# ── key names PyMuPDF cannot address ─────────────────────────────────────
+
+
+def _with_object_text_key(doc, xref: int, key_and_value: str) -> None:
+    """Append ``/Key value`` to an object's dictionary text, so the key is
+    stored under the name the file spells (a ``#20`` escape is a space)."""
+    text = doc.xref_object(xref, compressed=False).rstrip()
+    assert text.endswith(">>")
+    doc.update_object(xref, text[:-2] + key_and_value + ">>")
+
+
+def test_an_info_key_with_a_space_in_its_name_does_not_fail_the_export():
+    """Real: an IRS-style form carries ``/Info`` keys such as ``Form fields``.
+    Setting such a key to null raises in PyMuPDF and used to abort the export."""
+    d = _doc()
+    ix = d.get_new_xref()
+    d.update_object(ix, f"<</Title (t)/Form#20fields ({META})>>")
+    d.xref_set_key(-1, "Info", f"{ix} 0 R")
+    src = _bytes(d)
+    assert _readable(src, META)
+    out = _burn(src)
+    assert not _readable(out, META)
+    assert SSN not in _text(out)
+
+
+def test_standard_metadata_stamped_after_an_info_dictionary_was_replaced_survives():
+    from lexcloak_pdf_tool import set_metadata
+    d = _doc()
+    ix = d.get_new_xref()
+    d.update_object(ix, f"<</Form#20fields ({META})>>")
+    d.xref_set_key(-1, "Info", f"{ix} 0 R")
+    out = set_metadata(_burn(_bytes(d)), {"subject": "stamped-later"})
+    o = pymupdf.open(stream=out, filetype="pdf")
+    assert o.metadata["subject"] == "stamped-later"
+    assert not _readable(out, META)
+
+
+def test_a_catalog_key_that_cannot_be_addressed_is_left_and_reported_not_fatal():
+    d = _doc()
+    _with_object_text_key(d, d.pdf_catalog(), "/Odd#20Key (spacemark)")
+    src = _bytes(d)
+    assert _readable(src, "spacemark")
+    out = _burn(src)                                   # the export still succeeds
+    assert SSN not in _text(out)
+    report = residue_report_pdf(out)
+    assert report["unknown_keys"] >= 1                 # and the caller can tell
