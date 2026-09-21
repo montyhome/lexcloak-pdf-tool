@@ -510,7 +510,7 @@ def test_startup_line_emitted_on_stderr():
     code, stderr = s.close()
     text = stderr.decode("utf-8", errors="replace")
     assert "lexcloak_pdf_tool starting" in text
-    assert "protocol_version=7" in text
+    assert "protocol_version=8" in text
     assert "pymupdf_version=" in text
 
 
@@ -556,22 +556,31 @@ def test_protocol_version_v1_rejected():
     assert resp["error_type"] == "ProtocolVersionMismatch"
 
 
-def test_protocol_version_v8_rejected():
+def test_protocol_version_v9_rejected():
     """Future versions outside the supported set are rejected.
 
     Was ``v5_rejected`` until 0.6.8 (`render_clip` + `list_annotations`),
     ``v6_rejected`` until 0.7.0, when v6 joined the supported set for the
-    `extract_pages` ops, and ``v7_rejected`` until 0.8.0 (`trace_text`). The
-    assertion it encodes -- "a version we do not know is refused, not
-    ignored" -- is what matters, so it moves to the next unsupported number
-    rather than being deleted.
+    `extract_pages` ops, ``v7_rejected`` until 0.8.0 (`trace_text`) and
+    ``v8_rejected`` until 0.9.0 (`residue_report`). The assertion it encodes
+    -- "a version we do not know is refused, not ignored" -- is what matters,
+    so it moves to the next unsupported number rather than being deleted.
     """
     with CLISession() as s:
-        s.write_frame({"protocol_version": 8, "op": "page_count",
+        s.write_frame({"protocol_version": 9, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf())})
         resp = s.read_frame()
     assert resp["ok"] is False
     assert resp["error_type"] == "ProtocolVersionMismatch"
+
+
+def test_protocol_version_v8_now_accepted():
+    """v8 is the version the 0.9.0 `residue_report` op needs."""
+    with CLISession() as s:
+        s.write_frame({"protocol_version": 8, "op": "page_count",
+                       "pdf_b64": _b64(_make_pdf())})
+        resp = s.read_frame()
+    assert resp["ok"] is True
 
 
 def test_protocol_version_v7_now_accepted():

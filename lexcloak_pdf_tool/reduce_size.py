@@ -43,6 +43,7 @@ import io
 import logging
 
 from .redact import null_page_thumbnails, open_pdf
+from .sanitise import sanitise_document, strip_extra_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,11 @@ def _scrub_lossless(doc) -> None:
         reset_responses=False,
     )
     null_page_thumbnails(doc)
+    # scrub() does not reach actions, associated files, image description
+    # segments or metadata beyond the standard keys (see ``sanitise``). Tagged
+    # text is left alone here: this op burns nothing, so it has no touched pages.
+    sanitise_document(doc, None)
+    strip_extra_metadata(doc)
 
 
 def _apply_reductions(doc, *, dpi=None, quality=75, grayscale=False,

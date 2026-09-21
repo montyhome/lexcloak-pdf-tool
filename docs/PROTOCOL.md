@@ -52,6 +52,7 @@ as a clean exit.
        | "open_doc" | "close_doc" | "open_doc_path"
        | "extract_pages" | "extract_pages_h"
        | "trace_text" | "trace_text_h"
+       | "residue_report"
        | "render_h" | "extract_native_h" | "extract_ocr_h"
        | "extract_text_dict_h" | "extract_text_plain_h"
        | "search_for_h" | "apply_redactions_h" | "strip_metadata_h"
@@ -204,6 +205,41 @@ Tesseract OCR plus character coordinates and per-line spans.
 
 Returns `null` (not an error) when Tesseract is unavailable or OCR fails.
 Callers should fall back to native-text extraction.
+
+### `residue_report`  *(v8+)*
+
+Counts of what a document still carries outside its visible page content.
+Read-only, and the counts never include any text from the document. A file
+`apply_redactions` produced is clean when every count is zero.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required (unencrypted) |
+| `pages` | list of int | `null`: tagged text is not counted |
+
+`pages` names the page indices a redaction touched, in the delivered
+document's numbering. `/ActualText` and `/Alt` are counted only there, since
+that is the only place `apply_redactions` removes them.
+
+**Result:**
+```json
+{"report": {
+  "active_content": int,
+  "extra_info_keys": int,
+  "page_metadata": int,
+  "piece_info": int,
+  "unknown_keys": int,
+  "associated_files": int,
+  "image_metadata": int,
+  "tagged_text": int
+}}
+```
+
+`active_content` counts actions other than go-to, URI and named (and, for
+`/OpenAction`, anything but a go-to), and every `/AA` dictionary.
+`extra_info_keys`, `page_metadata`, `piece_info` and `unknown_keys` count
+metadata beyond the eight standard `/Info` keys. `image_metadata` counts
+plain-DCT images still carrying a comment, EXIF or XMP segment.
 
 ### `trace_text`  *(v7+)*
 
@@ -632,6 +668,7 @@ The following ops accept `handle` (string, required) instead of `pdf_b64`:
 | `extract_text_dict` | `extract_text_dict_h` | `{"blocks": [...]}` |
 | `extract_text_plain` | `extract_text_plain_h` | `{"text": str}` |
 | `trace_text` | `trace_text_h` | `{"rect": [...], "rotation": int, "image_cover": float, "words": [...]}` |
+| `residue_report` | — | `{"report": {...}}` |
 | `search_for` | `search_for_h` | `{"rects": [...]}` |
 | `apply_redactions` | `apply_redactions_h` | `{"pdf_b64": str, "protection_applied": bool}` |
 | `strip_metadata` | `strip_metadata_h` | `{"pdf_b64": str}` |
@@ -723,4 +760,5 @@ shipping client has caught up.
 | 0.6.7 | 4 | No new ops, no wire-surface change — frames are byte-identical to 0.6.6. Retires the deprecated `fitz` alias: the package and its tests now `import pymupdf`. `fitz` is a `from pymupdf import *` shim, so every name this package uses resolves to the identical object (verified against PyMuPDF 1.27.2.3 and 1.28.2) — but `import fitz` writes a deprecation warning to **stdout** at import time on 1.28.2+, and stdout is this protocol's frame channel. An import-time write lands ahead of every in-process mitigation, so not importing the alias is the only fix that reaches it. PyMuPDF also states the alias will be removed in a future release, which would make the subprocess unstartable. `PROTOCOL_VERSION` stays 4; the supported set stays {2, 3, 4}. |
 | 0.7.0 | **6** | Adds `extract_pages` (+ `extract_pages_h`) — page-range split with re-based bookmarks, backing the closed app's scan-cost preflight "split into scannable parts" offer — **and `open_doc_path`**, a handle opened from a filesystem path so concurrent readers share one mmap instead of each holding a private copy. Both ops landed under v6 before 0.7.0 was released, so no shipped binary ever advertised 6 with only one of them; once 0.7.0 ships, a further op needs v7. Bumps the protocol so a client can capability-gate the split offer from the startup banner instead of discovering an unknown op mid-flow. The supported set widens to {2, 3, 4, 5, 6}; every existing client is unaffected. |
 | 0.8.0 | **7** | Adds `trace_text` (+ `trace_text_h`): every word a page carries, with its render mode, fill opacity, optional-content group and state, whether it survives clip-respecting extraction, and whether a later fill or image covers it, all in the rotated page frame. It lets a client compare a page's text content against a render of the page. **And** `apply_redactions` (+ `_h`) gains the optional `remove_text` field: remove named words' text with no fill and no change to images or graphics, verified on a one-page copy before it is applied, reported back as `text_removal`. Additive; the supported set widens to {2, 3, 4, 5, 6, 7}, so every existing client is unaffected. |
+| 0.9.0 | **8** | Adds `residue_report`, and widens what `apply_redactions` (+ `_h`) and `reduce_size` (+ `_h`) remove from the delivered file, with **no new request field**. Removed: every action other than go-to, URI and named (an `/OpenAction` survives only as a go-to), all `/AA` dictionaries; `/Info` keys beyond the eight standard ones, page and image `/Metadata`, `/PieceInfo`, catalog and page keys outside the PDF specification's, and the trailer `/ID` (regenerated on save); `/AF` associated files; comment, EXIF and XMP segments inside plain-DCT JPEG images, without re-encoding; and `/ActualText` and `/Alt` on the pages a redaction touched (page content, forms, property lists and structure elements), because a tag that repeats a sentence keeps the words the burn removed from the glyphs. A tag on a page nothing was redacted from is kept. A client that ignores the new op is unaffected; one that needs the check should treat a missing op as "could not check". Additive; the supported set widens to {2, 3, 4, 5, 6, 7, 8}. |
 | 0.6.8 | **5** | Adds `render_clip` and `list_annotations` (v5+). **Bumps the protocol version, departing from the additive-no-bump precedent set at 0.6.0/0.6.3** — deliberately. Those additions were optional enhancements a client could simply not call; these two back a closed-app export-integrity gate that fails CLOSED, so a client built against them has no safe degraded mode. Advertising 5 lets that client detect an too-old subprocess from the startup banner and refuse to start, instead of discovering it as a per-export refusal once a user is mid-document. The supported set widens to {2, 3, 4, 5}, so every existing client — including the closed app, which declares 2 on stateless calls — is unaffected. |

@@ -21,7 +21,9 @@ of the same name.
 * ``search_for``            -- substring / whole-word / split search.
 * ``apply_redactions``      -- black-box redactions, out-of-content residue
                                scrub (annotations / attachments / document
-                               JavaScript / thumbnails), optional re-encrypt.
+                               JavaScript / thumbnails / actions / extra
+                               metadata / image comment segments / tagged
+                               text on redacted pages), optional re-encrypt.
 * ``strip_metadata``        -- remove document metadata + XMP.
 * ``page_count``            -- number of pages.
 * ``page_size``             -- page dimensions in points.
@@ -54,7 +56,7 @@ version = _pymupdf.version
 #: back to it when ``importlib.metadata`` has no dist-info to read (e.g. inside
 #: the frozen PyInstaller bundle). Keep it a plain string literal so
 #: setuptools can extract it statically without importing this module.
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 
 def pymupdf_version() -> str:

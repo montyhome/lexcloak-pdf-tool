@@ -99,6 +99,7 @@ from lexcloak_pdf_tool.redact import (
 )
 from lexcloak_pdf_tool.reduce_size import _apply_reductions, _validate_reduce_params
 from lexcloak_pdf_tool.render import _render_page_doc
+from lexcloak_pdf_tool.sanitise import residue_report_pdf
 from lexcloak_pdf_tool.trace import _trace_text_doc, trace_text
 
 # MuPDF's C library writes error/warning lines directly to fd 1 (stdout),
@@ -148,11 +149,14 @@ _pymupdf.set_messages(stream=sys.stderr)
 # v7 (0.8.0) adds ``trace_text``/``trace_text_h``: every word a page's
 # content carries, with its render mode, opacity, optional-content state,
 # clipping and whether a later fill or image covers it.
+# v8 (0.9.0) adds ``residue_report``: counts of what a delivered file still
+# carries outside its visible content (actions, extra metadata, associated
+# files, image description segments, tagged text on named pages).
 # Older versions stay supported so a newer
 # subprocess can still serve older clients cleanly; once every shipping
 # client speaks v4+, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 7
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7}
+PROTOCOL_VERSION = 8
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -599,6 +603,22 @@ def _op_trace_text(cmd: dict) -> dict:
     return trace_text(pdf_bytes, int(cmd.get("page", 0)))
 
 
+def _op_residue_report(cmd: dict) -> dict:
+    """Counts, never text, of what a document still carries (v8+).
+
+    ``pages`` optionally names the page indices a redaction touched, which is
+    where tagged text is counted. See `sanitise.residue_report`.
+    """
+    pdf_bytes = _decode_pdf(cmd)
+    pages = cmd.get("pages")
+    if pages is not None:
+        if not isinstance(pages, list) or not all(
+                isinstance(p, int) and not isinstance(p, bool) for p in pages):
+            raise ValueError("pages must be a list of integers")
+        pages = set(pages)
+    return {"report": residue_report_pdf(pdf_bytes, pages)}
+
+
 def _op_extract_text_plain(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     page = int(cmd.get("page", 0))
@@ -1019,6 +1039,7 @@ _OPS = {
     # v7 text trace
     "trace_text": _op_trace_text,
     "trace_text_h": _op_trace_text_h,
+    "residue_report": _op_residue_report,
 }
 
 
