@@ -6,6 +6,8 @@ import logging
 
 import pymupdf as _pymupdf
 
+from .sanitise import drop_javascript_names, sanitise_document, strip_extra_metadata
+
 PDF_ENCRYPT_AES_256 = _pymupdf.PDF_ENCRYPT_AES_256
 PDF_PERM_ACCESSIBILITY = _pymupdf.PDF_PERM_ACCESSIBILITY
 Rect = _pymupdf.Rect
@@ -126,6 +128,9 @@ def _strip_metadata_doc(doc) -> None:
         "keywords": "",
     })
     doc.del_xml_metadata()
+    # The eight keys above are the standard ones. Anything else in /Info, page
+    # and image metadata streams, private data and the trailer /ID go too.
+    strip_extra_metadata(doc)
 
 
 def strip_metadata(pdf_bytes_or_doc):
@@ -245,7 +250,7 @@ def null_page_thumbnails(doc) -> int:
     return dropped
 
 
-def _scrub_residue(doc) -> None:
+def _scrub_residue(doc, touched_pages=None) -> None:
     """Strip non-page-content residue that survives ``apply_redactions``.
 
     ``apply_redactions`` only rewrites *page content streams*. Four classes of
@@ -321,7 +326,12 @@ def _scrub_residue(doc) -> None:
     # the /Names/JavaScript name tree in place -- and its NAMES are author
     # chosen, so a script named for a matter or custodian would ride out in
     # a document that is supposed to carry nothing along. Drop the tree.
-    doc.xref_set_key(doc.pdf_catalog(), "Names/JavaScript", "null")
+    drop_javascript_names(doc)
+
+    # Everything else a delivered file can carry outside its visible content:
+    # actions, associated files, image description segments, and tagged text on
+    # the pages this export touched. See ``sanitise``.
+    sanitise_document(doc, touched_pages)
 
 
 # A rect within this many points of a page edge is treated as flush against
@@ -587,6 +597,17 @@ def _apply_redactions_doc(doc, matches: list[dict],
         page.add_redact_annot(rect, fill=(0, 0, 0))
         page.apply_redactions()
 
+    # The pages a redaction burned or removed text from, in the indices they
+    # will have once removed pages are deleted: a tag on one of them can still
+    # hold the words the burn took off the glyphs (see ``sanitise``).
+    touched = set(by_page) | {p for p in blackout_set if 0 <= p < len(doc)}
+    if removal_plan is not None:
+        touched |= set(removal_plan)
+    touched -= removed_set
+    removed_sorted = sorted(p for p in removed_set if 0 <= p < len(doc))
+    touched = {p - sum(1 for r in removed_sorted if r < p)
+               for p in touched if 0 <= p < len(doc)}
+
     if removed_set:
         valid_removed = {p for p in removed_set if 0 <= p < len(doc)}
         if valid_removed and len(valid_removed) >= len(doc):
@@ -598,7 +619,7 @@ def _apply_redactions_doc(doc, matches: list[dict],
     # attachments, document JavaScript, pre-burn page thumbnails) -- none of it
     # is touched by apply_redactions. Runs after every content pass so it sees
     # the final annot set, and before _strip_metadata_doc, which owns metadata.
-    _scrub_residue(doc)
+    _scrub_residue(doc, touched_pages=touched)
 
     _strip_metadata_doc(doc)
 
