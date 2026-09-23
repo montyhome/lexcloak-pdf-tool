@@ -210,6 +210,44 @@ def _flatten_form_fields(doc) -> None:
     # bake(annots=False, widgets=True): flatten only interactive form widgets.
     # Non-widget annotations are handled by _scrub_residue (deleted, not baked).
     doc.bake(annots=False, widgets=True)
+    drop_baked_widget_objects(doc)
+
+
+def drop_baked_widget_objects(doc) -> int:
+    """Null every widget object no page lists any more; return how many.
+
+    ``bake`` paints each widget into its page and takes it off the page's
+    ``/Annots``, and the ``/AcroForm`` dictionary goes. The widget OBJECTS stay
+    in the file whenever something else still points at them, and a tagged
+    form always has something: each field's structure element holds an object
+    reference (``/K << /Type /OBJR /Obj N 0 R >>``) to its widget. Measured on
+    pymupdf 1.28.2 against a public two-page fill-in form: all 199 widgets
+    survived the bake and the save's garbage collection, reachable through 224
+    structure elements, and so did the parent field dictionaries their
+    ``/Parent`` keys point at. Those objects carry ``/V``, so on a filled form
+    every value survived an export that looked flat.
+
+    Replacing each object with ``null`` ends that. A reference to it now
+    resolves to null, and the parent field dictionaries, which nothing else
+    references once ``/AcroForm`` is gone, are collected by the save. The
+    structure element keeps its place in the tree with nothing behind it,
+    which is what a flattened field is.
+
+    A widget still listed on a page is left alone: ``bake`` did not flatten it,
+    and nulling it would hide from the caller a live field that should stop the
+    export. Numbers the xref never defines are passed over (see
+    ``scrub_objects``).
+    """
+    on_pages = {xref for page in doc for xref, _, _ in page.annot_xrefs()}
+    pdf = _pymupdf.mupdf.pdf_specifics(doc.this)
+    dropped = 0
+    for xref in range(1, doc.xref_length()):
+        if xref in on_pages or not _pymupdf.mupdf.pdf_object_exists(pdf, xref):
+            continue
+        if doc.xref_get_key(xref, "Subtype")[1] == "/Widget":
+            doc.update_object(xref, "null")
+            dropped += 1
+    return dropped
 
 
 # Annotation types the residue scrub KEEPS. Links carry no free text of their
