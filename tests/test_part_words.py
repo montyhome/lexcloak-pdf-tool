@@ -215,7 +215,7 @@ def test_removing_text_the_box_hides_changes_nothing_inside_its_box():
     before, after = _gray(render_page(pdf, 0)), _gray(out["png"])
     for box in word["chars"][:5]:
         assert np.array_equal(_window(before, box), _window(after, box))
-    assert out["lost"] == [] and out["missed"] == []
+    assert out["lost"] == [] and out["missed"] == [] and out["kept"] == []
 
 
 def test_removing_a_visible_comma_changes_its_box():

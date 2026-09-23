@@ -329,7 +329,8 @@ Each `remove` entry has the `remove_text` shape above without `page`
 
 **Result:**
 ```json
-{"png_b64": str, "lost": [[x0, y0, x1, y1], ...], "missed": [int, ...]}
+{"png_b64": str, "lost": [[x0, y0, x1, y1], ...], "kept": [[x0, y0, x1, y1], ...],
+ "missed": [int, ...]}
 ```
 
 - The PNG is rendered exactly as `render` renders at the same `dpi`, and
@@ -338,6 +339,10 @@ Each `remove` entry has the `remove_text` shape above without `page`
   with it (a band through a covered letter can cross a label drawn over the
   same place), so a caller can tell a character's own effect from a
   neighbour's.
+- Each run gets the thinnest band, and any named character still there gets
+  the wider `remove_text` bands in turn, so the render shows what the
+  removal would really take. `kept` is the box of each named character that
+  even the widest band left: its render proves nothing about whether it shows.
 - `missed` is the index of each entry whose word was not found.
 - The removal runs on a copy of the whole document: a one-page copy would
   lose the document's optional-content configuration and draw a
@@ -731,7 +736,7 @@ The following ops accept `handle` (string, required) instead of `pdf_b64`:
 | `extract_text_plain` | `extract_text_plain_h` | `{"text": str}` |
 | `trace_text` | `trace_text_h` | `{"rect": [...], "rotation": int, "image_cover": float, "words": [...]}` |
 | `residue_report` | — | `{"report": {...}}` |
-| `render_removed` | `render_removed_h` | `{"png_b64": str, "lost": [...], "missed": [...]}` |
+| `render_removed` | `render_removed_h` | `{"png_b64": str, "lost": [...], "kept": [...], "missed": [...]}` |
 | `search_for` | `search_for_h` | `{"rects": [...]}` |
 | `apply_redactions` | `apply_redactions_h` | `{"pdf_b64": str, "protection_applied": bool}` |
 | `strip_metadata` | `strip_metadata_h` | `{"pdf_b64": str}` |

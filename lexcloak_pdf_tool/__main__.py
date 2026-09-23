@@ -617,7 +617,7 @@ def _render_removed_result(doc, cmd: dict) -> dict:
     out = render_removed_doc(doc, page, by_page.get(page, []),
                              float(cmd.get("dpi", 150)))
     return {"png_b64": base64.b64encode(out["png"]).decode("ascii"),
-            "lost": out["lost"], "missed": out["missed"]}
+            "lost": out["lost"], "kept": out["kept"], "missed": out["missed"]}
 
 
 def _op_render_removed(cmd: dict) -> dict:

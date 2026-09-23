@@ -368,21 +368,36 @@ def _copy_for_render(doc, pno: int):
     return copy
 
 
+def _present(keys: list, have: Counter) -> list[int]:
+    """Positions in ``keys`` that still find a partner in ``have``."""
+    left = _unpaired(Counter(keys), have)
+    out = []
+    for i, k in enumerate(keys):
+        if left.get(k):
+            left[k] -= 1                # this one found no partner: gone
+        else:
+            out.append(i)
+    return out
+
+
 def render_removed_doc(doc, pno: int, items: list[dict], dpi: float) -> dict:
     """Render page ``pno`` as it would look with ``items``' text removed.
 
     Each item names a word, or some of its characters, exactly as a
-    ``remove_text`` entry does. The removal runs on a copy of the whole
-    document (a one-page copy would lose the document's optional-content
-    configuration and draw a switched-off layer), with the thinnest band and
-    no verify, because nothing here is delivered: the caller compares this
-    render with the page's own to see which characters change nothing when
-    they go. So that it can tell a character's own effect from a neighbour
-    lost with it, the result names every OTHER character the copy lost.
+    ``remove_text`` entry does. Nothing here is delivered: the caller
+    compares this render with the page's own to see which characters change
+    nothing when they go. So the removal runs on a copy, with no verify, but
+    it must really remove what it is given, or an untouched character would
+    read as one whose removal changes nothing. Each run gets the thinnest
+    band, and any character still there gets the wider ``remove_text`` bands
+    in turn. What even the widest band leaves is reported as ``kept``.
 
-    Returns ``{"png": bytes, "lost": [[x0, y0, x1, y1], ...], "missed":
-    [index, ...]}``: ``lost`` boxes are as-rendered, ``missed`` the items
-    whose word was not found.
+    To let the caller tell a character's own effect from a neighbour's, the
+    result also names every OTHER character the copy lost (``lost``).
+
+    Returns ``{"png": bytes, "lost": [[x0, y0, x1, y1], ...], "kept":
+    [[x0, y0, x1, y1], ...], "missed": [index, ...]}``: boxes as-rendered,
+    ``missed`` the items whose word was not found.
     """
     if not (0 <= pno < len(doc)):
         raise IndexError(f"page_num {pno} out of range for {len(doc)}-page document")
@@ -392,7 +407,7 @@ def render_removed_doc(doc, pno: int, items: list[dict], dpi: float) -> dict:
     try:
         words, before = _keys_with_layers_on(copy, pno)
         missed: list[int] = []
-        parts: list[dict] = []
+        targets: list[tuple[dict, list[int]]] = []
         taken: set[int] = set()
         for i, item in enumerate(items):
             match = next((j for j, w in enumerate(words)
@@ -403,16 +418,25 @@ def render_removed_doc(doc, pno: int, items: list[dict], dpi: float) -> dict:
                 missed.append(i)
                 continue
             taken.add(match)
-            parts.append(_target(words[match], item))
+            word = words[match]
+            targets.append((word, list(item.get("chars") or range(len(word["keys"])))))
         page = copy[pno]
-        if parts:
-            _apply(page, [b for part in parts for b in _bands(page, part, BANDS[0])])
+        remaining = targets
+        for share in BANDS:
+            if not remaining:
+                break
+            _apply(page, [b for w, pos in remaining for b in _bands(page, _part(w, pos), share)])
+            _, now = _keys_with_layers_on(copy, pno)
+            remaining = [(w, [pos[i] for i in _present([w["keys"][q] for q in pos], now)])
+                         for w, pos in remaining]
+            remaining = [(w, pos) for w, pos in remaining if pos]
         _, after = _keys_with_layers_on(copy, pno)
-        target = Counter(k for part in parts for k in part["keys"])
+        target = Counter(w["keys"][q] for w, pos in targets for q in pos)
         lost = _unpaired(_unpaired(before, target), after)
         boxes = [c for w in words for k, c in zip(w["keys"], w["chars"], strict=True)
                  if lost.get(k)]
+        kept = [w["chars"][q] for w, pos in remaining for q in pos]
         png = _render_page_doc(copy, pno, dpi)
-        return {"png": png, "lost": boxes, "missed": missed}
+        return {"png": png, "lost": boxes, "kept": kept, "missed": missed}
     finally:
         copy.close()
