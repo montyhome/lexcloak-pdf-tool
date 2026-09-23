@@ -243,14 +243,35 @@ def test_nothing_removed_renders_exactly_as_the_page_does():
     assert _render_removed(pdf, [])["png"] == render_page(pdf, 0)
 
 
-def test_a_switched_off_layer_stays_off_in_the_render():
+@pytest.mark.parametrize("pages", [1, 3])
+def test_a_switched_off_layer_stays_off_in_the_render(pages):
     doc = pymupdf.open()
-    page = doc.new_page(width=612, height=792)
+    for _ in range(pages):
+        page = doc.new_page(width=612, height=792)
     ocg = doc.add_ocg("Notes", on=False)
     page.insert_text((72, 200), "Layer text nobody sees", fontsize=11, oc=ocg)
     page.insert_text((72, 300), LINE, fontsize=11)
     pdf = doc.tobytes()
-    assert _render_removed(pdf, [])["png"] == render_page(pdf, 0)
+    last = pages - 1
+    with pymupdf.open(stream=pdf) as opened:
+        out = render_removed_doc(opened, last, [], 150)
+    assert out["png"] == render_page(pdf, last)
+
+
+def test_a_later_page_of_a_document_without_layers_renders_as_it_does():
+    """The cheap path: only the page itself is copied."""
+    doc = pymupdf.open()
+    for n in range(3):
+        doc.new_page(width=612, height=792).insert_text((72, 300), f"{LINE} {n}",
+                                                        fontsize=11)
+    pdf = doc.tobytes()
+    with pymupdf.open(stream=pdf) as opened:
+        word = next(w for w in trace_text(pdf, 2)["words"] if w["text"] == "Quillon")
+        item = validate_remove_text([_item(word) | {"page": 2}])[2]
+        nothing = render_removed_doc(opened, 2, [], 150)
+        removed = render_removed_doc(opened, 2, item, 150)
+    assert nothing["png"] == render_page(pdf, 2)
+    assert removed["png"] != render_page(pdf, 2) and removed["missed"] == []
 
 
 def test_the_render_leaves_the_document_itself_untouched():

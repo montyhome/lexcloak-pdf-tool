@@ -350,6 +350,24 @@ def remove_text_doc(doc, by_page: dict[int, list[dict]],
 # ── A render with some text removed (v9) ─────────────────────────────────
 
 
+def _copy_for_render(doc, pno: int):
+    """A copy to remove text from and render, drawn exactly like ``doc``.
+
+    One page is enough, and cheap, unless the document has optional-content
+    groups: a one-page copy loses the document's layer configuration and
+    draws a switched-off layer, so then the whole document is copied.
+    """
+    try:
+        layered = bool(doc.get_ocgs())
+    except Exception:  # noqa: BLE001 -- a broken /OCProperties: copy it all
+        layered = True
+    if layered or len(doc) == 1:
+        return _pymupdf.open(stream=doc.tobytes(), filetype="pdf")
+    copy = _pymupdf.open()
+    copy.insert_pdf(doc, from_page=pno, to_page=pno)
+    return copy
+
+
 def render_removed_doc(doc, pno: int, items: list[dict], dpi: float) -> dict:
     """Render page ``pno`` as it would look with ``items``' text removed.
 
@@ -368,7 +386,9 @@ def render_removed_doc(doc, pno: int, items: list[dict], dpi: float) -> dict:
     """
     if not (0 <= pno < len(doc)):
         raise IndexError(f"page_num {pno} out of range for {len(doc)}-page document")
-    copy = _pymupdf.open(stream=doc.tobytes(), filetype="pdf")
+    copy = _copy_for_render(doc, pno)
+    if len(copy) == 1:
+        pno = 0
     try:
         words, before = _keys_with_layers_on(copy, pno)
         missed: list[int] = []
