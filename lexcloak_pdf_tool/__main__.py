@@ -98,6 +98,7 @@ from lexcloak_pdf_tool.redact import (
     open_pdf_path,
 )
 from lexcloak_pdf_tool.reduce_size import _apply_reductions, _validate_reduce_params
+from lexcloak_pdf_tool.remove_text import render_removed_doc, validate_remove_text
 from lexcloak_pdf_tool.render import _render_page_doc
 from lexcloak_pdf_tool.sanitise import residue_report_pdf
 from lexcloak_pdf_tool.trace import _trace_text_doc, trace_text
@@ -152,11 +153,14 @@ _pymupdf.set_messages(stream=sys.stderr)
 # v8 (0.9.0) adds ``residue_report``: counts of what a delivered file still
 # carries outside its visible content (actions, extra metadata, associated
 # files, image description segments, tagged text on named pages).
+# v9 (0.10.0) adds render_removed/render_removed_h (a page rendered as
+# it would look with some text removed), per-character boxes and later covers
+# on trace_text, and chars on remove_text entries (part of a word).
 # Older versions stay supported so a newer
 # subprocess can still serve older clients cleanly; once every shipping
 # client speaks v4+, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 8
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8}
+PROTOCOL_VERSION = 9
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -603,6 +607,28 @@ def _op_trace_text(cmd: dict) -> dict:
     return trace_text(pdf_bytes, int(cmd.get("page", 0)))
 
 
+def _render_removed_result(doc, cmd: dict) -> dict:
+    items = cmd.get("remove")
+    if not isinstance(items, list):
+        raise ValueError("render_removed needs a 'remove' list")
+    page = int(cmd.get("page", 0))
+    # The same entry shape and checks as remove_text; the page is the op's.
+    by_page = validate_remove_text([{**item, "page": page} for item in items])
+    out = render_removed_doc(doc, page, by_page.get(page, []),
+                             float(cmd.get("dpi", 150)))
+    return {"png_b64": base64.b64encode(out["png"]).decode("ascii"),
+            "lost": out["lost"], "kept": out["kept"], "missed": out["missed"]}
+
+
+def _op_render_removed(cmd: dict) -> dict:
+    """A page rendered as it would look with some text removed (v9+)."""
+    doc = open_pdf(_decode_pdf(cmd))
+    try:
+        return _render_removed_result(doc, cmd)
+    finally:
+        doc.close()
+
+
 def _op_residue_report(cmd: dict) -> dict:
     """Counts, never text, of what a document still carries (v8+).
 
@@ -798,6 +824,10 @@ def _op_extract_text_dict_h(cmd: dict) -> dict:
 def _op_trace_text_h(cmd: dict) -> dict:
     doc = _resolve_handle(_get_handle(cmd))
     return _trace_text_doc(doc, int(cmd.get("page", 0)))
+
+
+def _op_render_removed_h(cmd: dict) -> dict:
+    return _render_removed_result(_resolve_handle(_get_handle(cmd)), cmd)
 
 
 def _op_extract_text_plain_h(cmd: dict) -> dict:
@@ -1040,6 +1070,9 @@ _OPS = {
     "trace_text": _op_trace_text,
     "trace_text_h": _op_trace_text_h,
     "residue_report": _op_residue_report,
+    # v9 text-removal preview
+    "render_removed": _op_render_removed,
+    "render_removed_h": _op_render_removed_h,
 }
 
 
