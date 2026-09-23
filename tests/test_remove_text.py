@@ -283,6 +283,74 @@ def test_a_word_whose_properties_differ_is_not_the_target():
     assert "Zqvx" in _traced_text(out)
 
 
+def _drifting() -> bytes:
+    """A line whose first word, once removed, nudges the glyphs after it.
+
+    MuPDF rewrites the run it cut from, and on this line some kept glyphs come
+    back a few millionths of a point off, across a 0.01 pt rounding edge. The
+    x position was found by search; ``test_the_drift_fixture_still_drifts``
+    fails if a MuPDF change stops it exercising the case.
+    """
+    doc, page = _doc()
+    page.insert_text((41.5, 300), "ZQVX WRTP HOLLISTAN,", fontsize=11)
+    return _bytes(doc)
+
+
+def _origins(pdf: bytes) -> dict[tuple[str, int], tuple[float, float]]:
+    """Each character's exact origin, keyed by character and occurrence."""
+    seen: dict[str, int] = {}
+    out = {}
+    for span in pymupdf.open(stream=pdf)[0].get_texttrace():
+        for c in span["chars"]:
+            ch = chr(c[0])
+            seen[ch] = seen.get(ch, 0) + 1
+            out[(ch, seen[ch])] = c[2]
+    return out
+
+
+def test_the_drift_fixture_still_drifts():
+    pdf = _drifting()
+    out, _ = _remove(pdf, _word_boxes(pdf, {"ZQVX"}))
+    before = {k: v for k, v in _origins(pdf).items() if k[0] not in "ZQVX"}
+    after = _origins(out)
+    moved = [k for k in before if before[k] != after[k]]
+    assert moved, "no kept glyph moved: rebuild the fixture"
+    assert all(abs(before[k][0] - after[k][0]) < 1e-3 for k in moved)
+    assert any(round(before[k][0], 2) != round(after[k][0], 2) for k in moved)
+
+
+def test_glyphs_nudged_by_the_rewrite_do_not_make_a_removal_unclean():
+    pdf = _drifting()
+    out, sink = _remove(pdf, _word_boxes(pdf, {"ZQVX"}))
+    assert sink == {"removed": [[0, 0]], "kept": []}
+    assert pymupdf.open(stream=out)[0].get_text().split() == [
+        "WRTP", "HOLLISTAN,"]
+    assert "ZQVX" not in _traced_text(out)
+
+
+def _k(c: str, x: float, y: float = 300.0, mode: int = 0) -> tuple:
+    return (c, x, y, mode, 1.0, "", (0.0,))
+
+
+@pytest.mark.parametrize("want, have, left", [
+    ([_k("A", 10.0)], [_k("A", 10.0)], []),
+    ([_k("A", 10.0)], [_k("A", 10.01)], []),
+    ([_k("A", 10.0)], [_k("A", 9.99, 300.01)], []),
+    ([_k("A", 10.0)], [_k("A", 10.02)], [_k("A", 10.0)]),
+    ([_k("A", 10.0)], [_k("B", 10.0)], [_k("A", 10.0)]),
+    ([_k("A", 10.0)], [_k("A", 10.0, mode=3)], [_k("A", 10.0)]),
+    # One partner each: two glyphs drawn in one place are still two.
+    ([_k("A", 10.0), _k("A", 10.0)], [_k("A", 10.01)], [_k("A", 10.0)]),
+    # Exact partners first, so a near one cannot take an exact one's partner.
+    ([_k("A", 10.01), _k("A", 10.02)], [_k("A", 10.01), _k("A", 10.03)], []),
+])
+def test_keys_pair_within_one_rounding_step(want, have, left):
+    from collections import Counter
+
+    from lexcloak_pdf_tool.remove_text import _unpaired
+    assert _unpaired(Counter(want), Counter(have)) == Counter(left)
+
+
 def test_visible_text_in_another_layer_at_the_same_place_survives():
     """A second-language layer drawn where the visible one is: remove only it."""
     doc, page = _doc()

@@ -26,7 +26,10 @@ optional-content layer, say). Three defences:
   other character must remain. If the page's whole set fails, each word is
   retried alone with progressively wider bands. A word that cannot be removed
   cleanly -- or that is not found at all -- is left in place and reported as
-  kept, never forced through.
+  kept, never forced through. Characters are compared with a tolerance of
+  one rounding step on their origins (``KEY_STEPS``): rewriting a text run
+  can move the glyphs left in it by a few millionths of a point, and a
+  character that moved that little has not been touched.
 
 Boxes arrive in the as-rendered (rotation-applied) frame, like redaction
 matches and like ``trace_text``'s own output.
@@ -46,6 +49,15 @@ BANDS = (0.1, 0.3, 0.6)
 INSET = 0.02
 #: A traced word matches a requested box when every edge is this close (pt).
 MATCH_TOL = 0.5
+#: Character keys carry origins rounded to 0.01 pt (``trace._key``). When
+#: MuPDF rewrites a text run to drop some of its glyphs, the glyphs it keeps
+#: can come back a few millionths of a point from where they were: measured
+#: 138.394989 -> 138.395004 on pymupdf 1.28.2. That is nothing on the page,
+#: but it tips the rounded key from 138.39 to 138.40, and an exact
+#: comparison then calls the kept glyph lost and the removal unclean. Two
+#: keys therefore pair when their origins are within this many rounding
+#: steps on each axis.
+KEY_STEPS = 1
 
 
 def _page_words(page) -> list[dict]:
@@ -109,6 +121,41 @@ def _keys_with_layers_on(doc, page_index: int) -> tuple[list[dict], Counter]:
     return words, Counter(k for w in words for k in w["keys"])
 
 
+def _cell(key: tuple) -> tuple[tuple, int, int]:
+    """A key split into its identity (character and drawing properties) and
+    its origin in whole rounding steps."""
+    return (key[0],) + tuple(key[3:]), round(key[1] * 100), round(key[2] * 100)
+
+
+def _unpaired(want: Counter, have: Counter) -> Counter:
+    """The keys in ``want`` that find no partner in ``have``, one to one.
+
+    Partners share a character and drawing properties, and their origins are
+    at most ``KEY_STEPS`` rounding steps apart on each axis. Exact partners
+    are paired first, so the tolerance only ever pairs keys an exact
+    comparison would have left over, and each key in ``have`` is used once:
+    two identical glyphs drawn in one place still count as two.
+    """
+    exact = want & have
+    want, have = want - exact, have - exact
+    pool: Counter = Counter()
+    for key, n in have.items():
+        pool[_cell(key)] += n
+    steps = range(-KEY_STEPS, KEY_STEPS + 1)
+    left: Counter = Counter()
+    for key, n in want.items():
+        ident, x, y = _cell(key)
+        for dx in steps:
+            for dy in steps:
+                cell = (ident, x + dx, y + dy)
+                took = min(n, pool[cell])
+                pool[cell] -= took
+                n -= took
+        if n:
+            left[key] = n
+    return left
+
+
 def _clean(doc, pno: int, targets: list[tuple[dict, float]]) -> bool:
     """Try removing ``targets`` ((word, band share) pairs) on a one-page copy."""
     scratch = _pymupdf.open()
@@ -117,10 +164,12 @@ def _clean(doc, pno: int, targets: list[tuple[dict, float]]) -> bool:
         page = scratch[0]
         _, before = _keys_with_layers_on(scratch, 0)
         target = Counter(k for w, _ in targets for k in w["keys"])
-        others = before - target
+        others = _unpaired(before, target)
         _apply(page, [_band(page, w["bbox"], s) for w, s in targets])
         _, after = _keys_with_layers_on(scratch, 0)
-        return not (target & after) and not (others - after)
+        # Whatever is on the page beyond the other text must not be a target.
+        extra = _unpaired(after, others)
+        return not _unpaired(others, after) and _unpaired(target, extra) == target
     finally:
         scratch.close()
 
