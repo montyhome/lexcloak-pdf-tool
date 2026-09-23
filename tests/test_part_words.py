@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 
-import numpy as np
 import pymupdf
 import pytest
 
@@ -69,17 +68,19 @@ def _traced(pdf: bytes) -> str:
     return "".join(chr(c[0]) for s in doc[0].get_texttrace() for c in s["chars"])
 
 
-def _gray(png: bytes) -> np.ndarray:
+def _gray(png: bytes) -> list[bytes]:
+    """The render as grey rows, one ``bytes`` per pixel row."""
     pix = pymupdf.Pixmap(png)
     if pix.n > 1:
         pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
-    return np.frombuffer(pix.samples, np.uint8).reshape(pix.h, pix.w)
+    rows = bytes(pix.samples)
+    return [rows[y * pix.stride:y * pix.stride + pix.w] for y in range(pix.h)]
 
 
-def _window(gray: np.ndarray, box, dpi: float = 150, inset: int = 1):
+def _window(gray: list[bytes], box, dpi: float = 150, inset: int = 1) -> list[bytes]:
     s = dpi / 72
-    return gray[int(box[1] * s) + inset:int(box[3] * s) + 1 - inset,
-                int(box[0] * s) + inset:int(box[2] * s) + 1 - inset]
+    x0, x1 = int(box[0] * s) + inset, int(box[2] * s) + 1 - inset
+    return [row[x0:x1] for row in gray[int(box[1] * s) + inset:int(box[3] * s) + 1 - inset]]
 
 
 # ── trace_text: character boxes and covers ────────────────────────────────
@@ -157,9 +158,10 @@ def test_part_of_a_word_goes_and_its_comma_stays():
     # The box hid the letters, so nothing a reader could see changed. Not
     # byte-identical: rewriting the run re-rasterises the glyphs left in it
     # by float noise (one pixel here, by a few grey levels).
-    diff = np.abs(_gray(render_page(out, 0)).astype(int)
-                  - _gray(render_page(pdf, 0)).astype(int))
-    assert int(np.count_nonzero(diff > 48)) == 0
+    after, before = _gray(render_page(out, 0)), _gray(render_page(pdf, 0))
+    assert len(after) == len(before)
+    assert not any(abs(a - b) > 48 for ra, rb in zip(after, before, strict=True)
+                   for a, b in zip(ra, rb, strict=True))
 
 
 def test_a_whole_word_entry_behaves_as_before():
@@ -214,7 +216,7 @@ def test_removing_text_the_box_hides_changes_nothing_inside_its_box():
     out = _render_removed(pdf, [_item(word, chars=[0, 1, 2, 3, 4])])
     before, after = _gray(render_page(pdf, 0)), _gray(out["png"])
     for box in word["chars"][:5]:
-        assert np.array_equal(_window(before, box), _window(after, box))
+        assert _window(before, box) == _window(after, box)
     assert out["lost"] == [] and out["missed"] == [] and out["kept"] == []
 
 
@@ -223,8 +225,7 @@ def test_removing_a_visible_comma_changes_its_box():
     word = _words(pdf)["Brask,"]
     out = _render_removed(pdf, [_item(word, chars=[5])])
     before, after = _gray(render_page(pdf, 0)), _gray(out["png"])
-    assert not np.array_equal(_window(before, word["chars"][5]),
-                              _window(after, word["chars"][5]))
+    assert _window(before, word["chars"][5]) != _window(after, word["chars"][5])
 
 
 def test_a_label_lost_with_the_covered_letters_is_named():
