@@ -250,6 +250,59 @@ def null_page_thumbnails(doc) -> int:
     return dropped
 
 
+def scrub_objects(doc, *, javascript: bool, xml_metadata: bool) -> None:
+    """Neutralise JavaScript actions and remove XMP, walking every object.
+
+    This is the object walk ``Document.scrub(javascript=..., xml_metadata=...)``
+    performs, done here so that an **object number the xref never defines**
+    does not abort it. Callers pass ``javascript=False, xml_metadata=False``
+    to ``scrub`` and call this instead.
+
+    ``scrub`` loads every number below ``xref_length()`` and raises on the
+    first one that will not load. A file whose ``/Size`` exceeds what its xref
+    sections cover -- common in linearized files carrying an incremental
+    update -- has numbers no section mentions, and loading one raises
+    ``cannot find object in xref``. Measured on pymupdf 1.28.2: a public
+    two-page fill-in form with two such numbers failed every
+    ``apply_redactions`` and ``reduce_size`` call, with or without boxes,
+    while every other scrub flag succeeded alone.
+
+    Skipping those numbers removes nothing that exists. A number no xref
+    section defines has no body in the file, a conforming reader resolves a
+    reference to it as null (ISO 32000-1, 7.3.10), and a save writes it as a
+    free entry. The test is ``pdf_object_exists``, which reads the xref entry
+    without loading the object. **Anything else that fails to load still
+    raises**, so a defined object that might carry script or XMP is never
+    passed over and the export fails closed.
+
+    Per object, the same steps as ``scrub``: a ``/S /JavaScript`` action gets
+    an empty body; a ``/Type /Metadata`` stream is emptied; any other
+    ``/Metadata`` key is nulled. ``xml_metadata`` also drops the catalog's
+    XMP first, as ``scrub`` does.
+    """
+    if xml_metadata:
+        doc.del_xml_metadata()
+    if not (javascript or xml_metadata):
+        return
+    pdf = _pymupdf.mupdf.pdf_specifics(doc.this)
+    for xref in range(1, doc.xref_length()):
+        if not _pymupdf.mupdf.pdf_object_exists(pdf, xref):
+            continue
+        if not doc.xref_object(xref):
+            raise ValueError(f"bad xref {xref}")
+        if javascript and doc.xref_get_key(xref, "S")[1] == "/JavaScript":
+            doc.update_object(xref, "<</S/JavaScript/JS()>>")
+            continue
+        if not xml_metadata:
+            continue
+        if doc.xref_get_key(xref, "Type")[1] == "/Metadata":
+            doc.update_object(xref, "<<>>")
+            doc.update_stream(xref, b"deleted", new=True)
+            continue
+        if doc.xref_get_key(xref, "Metadata")[0] != "null":
+            doc.xref_set_key(xref, "Metadata", "null")
+
+
 def _scrub_residue(doc, touched_pages=None) -> None:
     """Strip non-page-content residue that survives ``apply_redactions``.
 
@@ -304,7 +357,8 @@ def _scrub_residue(doc, touched_pages=None) -> None:
     doc.scrub(
         attached_files=True,
         embedded_files=True,
-        javascript=True,
+        # Done by scrub_objects below, which tolerates undefined xref numbers.
+        javascript=False,
         # Set for intent, but NOT trusted -- see null_page_thumbnails below.
         thumbnails=True,
         # Owned by _strip_metadata_doc, which runs immediately after.
@@ -318,11 +372,12 @@ def _scrub_residue(doc, touched_pages=None) -> None:
         reset_fields=False,
         reset_responses=False,
     )
+    scrub_objects(doc, javascript=True, xml_metadata=False)
 
     # scrub's own thumbnail branch is unreachable on this flag-set.
     null_page_thumbnails(doc)
 
-    # scrub(javascript=True) empties the action body to `/JS ()` but leaves
+    # scrub_objects (like scrub(javascript=True)) empties the action body to `/JS ()` but leaves
     # the /Names/JavaScript name tree in place -- and its NAMES are author
     # chosen, so a script named for a matter or custodian would ride out in
     # a document that is supposed to carry nothing along. Drop the tree.

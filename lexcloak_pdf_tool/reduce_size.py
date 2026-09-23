@@ -42,7 +42,7 @@ from __future__ import annotations
 import io
 import logging
 
-from .redact import null_page_thumbnails, open_pdf
+from .redact import null_page_thumbnails, open_pdf, scrub_objects
 from .sanitise import sanitise_document, strip_extra_metadata
 
 logger = logging.getLogger(__name__)
@@ -136,13 +136,17 @@ def _validate_preserve_metadata(preserve_metadata) -> frozenset[str]:
 # so this op silently never stripped thumbnails despite the module docstring
 # saying it did (measured 2026-08-02, v0.6.6). ``null_page_thumbnails``
 # below does it for real.
+#
+# ``javascript`` and ``xml_metadata`` are False here because ``scrub_objects``
+# does that object walk instead: scrub's own walk aborts on an object number
+# the xref never defines (see ``scrub_objects``).
 def _scrub_lossless(doc) -> None:
     doc.scrub(
         attached_files=True,
         embedded_files=True,
-        javascript=True,
+        javascript=False,
         metadata=True,
-        xml_metadata=True,
+        xml_metadata=False,
         thumbnails=True,
         hidden_text=False,
         clean_pages=False,
@@ -151,6 +155,7 @@ def _scrub_lossless(doc) -> None:
         reset_fields=False,
         reset_responses=False,
     )
+    scrub_objects(doc, javascript=True, xml_metadata=True)
     null_page_thumbnails(doc)
     # scrub() does not reach actions, associated files, image description
     # segments or metadata beyond the standard keys (see ``sanitise``). Tagged
