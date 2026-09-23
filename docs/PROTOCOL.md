@@ -53,6 +53,7 @@ as a clean exit.
        | "extract_pages" | "extract_pages_h"
        | "trace_text" | "trace_text_h"
        | "residue_report"
+       | "render_removed" | "render_removed_h"
        | "render_h" | "extract_native_h" | "extract_ocr_h"
        | "extract_text_dict_h" | "extract_text_plain_h"
        | "search_for_h" | "apply_redactions_h" | "strip_metadata_h"
@@ -264,8 +265,10 @@ render of the page. It makes no judgement about visibility itself.
   "words": [
     {"text": str, "bbox": [x0, y0, x1, y1], "size": float,
      "mode": int, "opacity": float, "layer": str, "layer_off": bool,
-     "clipped": bool, "covered_by": "image" | "path" | null, "span": int}
-  ]
+     "clipped": bool, "covered_by": "image" | "path" | null, "span": int,
+     "chars": [[x0, y0, x1, y1], ...]}           // v9+, only on some words
+  ],
+  "covers": [{"seq": int, "kind": str, "box": [x0, y0, x1, y1]}]   // v9+
 }
 ```
 
@@ -291,9 +294,57 @@ render of the page. It makes no judgement about visibility itself.
   words sharing it were drawn by one text-showing run, in any page rotation.
 - `image_cover` is the share of the page area covered by image draws, summed
   and capped at 1.0 — about 1.0 on a typical scanned page.
+- `chars` *(v9+)* is each character's box, in the order of `text` and in the
+  same rotated frame as `bbox`. It is present only on a word that a fill,
+  shading or image drawn **later** reaches into by any area, because a drawn
+  box rarely stops at a word boundary: it can end before a trailing comma or
+  in the middle of a letter, and a caller deciding which characters it hides
+  needs them one by one.
+- `covers` *(v9+)* lists each such later draw once: its drawing sequence
+  number (comparable with `span`), its kind (`fill-path`, `fill-shade`,
+  `fill-image` or `fill-imgmask`) and its rotated box. Whether a cover is
+  opaque is not reported, and neither are blend mode or soft mask: a render
+  of the page answers all of them together, and `render_removed` below gives
+  the caller the render to compare with.
 
 Words are split on whitespace within each span, in content-stream order.
 `IndexError` for a page out of range.
+
+### `render_removed`  *(v9+)*
+
+A page rendered as it would look with some text removed, for comparison with
+the page's own render: a character whose removal changes nothing inside its
+box is not visible on the page. Nothing is delivered from this op, so the
+removal runs once, with the thinnest band and no verify.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required |
+| `page` | int | `0` |
+| `dpi` | float | `150` |
+| `remove` | list of word dicts | required |
+
+Each `remove` entry has the `remove_text` shape above without `page`
+(`box`, `text`, `mode`, `opacity`, `layer`, optional `chars`).
+
+**Result:**
+```json
+{"png_b64": str, "lost": [[x0, y0, x1, y1], ...], "missed": [int, ...]}
+```
+
+- The PNG is rendered exactly as `render` renders at the same `dpi`, and
+  with nothing to remove it is byte-identical to it.
+- `lost` is the rotated box of every **other** character the removal took
+  with it (a band through a covered letter can cross a label drawn over the
+  same place), so a caller can tell a character's own effect from a
+  neighbour's.
+- `missed` is the index of each entry whose word was not found.
+- The removal runs on a copy of the whole document: a one-page copy would
+  lose the document's optional-content configuration and draw a
+  switched-off layer. The document or handle is not changed.
+
+`ValueError` for a missing or malformed `remove`, `IndexError` for a page out
+of range.
 
 ### `extract_text_dict`
 
@@ -414,6 +465,17 @@ one-page copy, and is applied only if every target character went and every
 other character stayed; failing that, each word is retried alone with wider
 bands. Text outside the page, in switched-off layers, clipped away or in
 render mode 3 is all reached.
+
+*(v9+)* An entry may also carry `"chars": [int, ...]`: the positions, in
+`text`, of the characters to remove, for a word only part of which is to go.
+The entry must still name the whole word as `trace_text` reported it; a
+position past its end means the word is not found. Each run of named
+characters gets its own band across just those glyphs, and the check is the
+same one, so the word's other characters must still be there afterwards. If
+the set fails, the part is halved until each half is removed cleanly or is a
+single character no band separates. That character is left and the entry is
+reported `kept`, while what could be separated is removed. An older
+subprocess ignores the field and removes the whole word.
 
 **Result:** `{"pdf_b64": str, "protection_applied": bool}`, plus, **exactly
 when the request carried `remove_text`**, `"text_removal": {"removed":
@@ -669,6 +731,7 @@ The following ops accept `handle` (string, required) instead of `pdf_b64`:
 | `extract_text_plain` | `extract_text_plain_h` | `{"text": str}` |
 | `trace_text` | `trace_text_h` | `{"rect": [...], "rotation": int, "image_cover": float, "words": [...]}` |
 | `residue_report` | — | `{"report": {...}}` |
+| `render_removed` | `render_removed_h` | `{"png_b64": str, "lost": [...], "missed": [...]}` |
 | `search_for` | `search_for_h` | `{"rects": [...]}` |
 | `apply_redactions` | `apply_redactions_h` | `{"pdf_b64": str, "protection_applied": bool}` |
 | `strip_metadata` | `strip_metadata_h` | `{"pdf_b64": str}` |
@@ -763,5 +826,5 @@ shipping client has caught up.
 | 0.9.0 | **8** | Adds `residue_report`, and widens what `apply_redactions` (+ `_h`) and `reduce_size` (+ `_h`) remove from the delivered file, with **no new request field**. Removed: every action other than go-to, URI and named (an `/OpenAction` survives only as a go-to), all `/AA` dictionaries; `/Info` keys beyond the eight standard ones, page and image `/Metadata`, `/PieceInfo`, catalog and page keys outside the PDF specification's, and the trailer `/ID` (regenerated on save); `/AF` associated files; comment, EXIF and XMP segments inside plain-DCT JPEG images, without re-encoding; and `/ActualText` and `/Alt` on the pages a redaction touched (page content, forms, property lists and structure elements), because a tag that repeats a sentence keeps the words the burn removed from the glyphs. A tag on a page nothing was redacted from is kept. A client that ignores the new op is unaffected; one that needs the check should treat a missing op as "could not check". Additive; the supported set widens to {2, 3, 4, 5, 6, 7, 8}. |
 | 0.9.1 | 8 | No new ops, no wire-surface change. `apply_redactions` (+ `_h`) and `reduce_size` no longer fail on a PDF whose xref leaves an object number undefined (its `/Size` exceeds what the xref sections cover, which is common in linearized files carrying an incremental update). PyMuPDF's `Document.scrub` walks every number for `javascript=True` / `xml_metadata=True` and raised `cannot find object in xref` on the first undefined one, so every export of such a file failed, with or without boxes. That walk now runs in the package (`redact.scrub_objects`) and passes over only the numbers `pdf_object_exists` reports undefined, which have no body and are written as free entries on save; a defined object that fails to load still raises. JavaScript and XMP removal are unchanged. `reduce_size_h` was not affected: it saves before it scrubs, and the save rebuilds the xref. |
 | 0.9.2 | 8 | No new ops, no wire-surface change. Flattening a tagged form in `apply_redactions` (+ `_h`) now leaves no widget object in the file. `bake(widgets=True)` takes each widget off its page, but a tagged form's structure tree points at every widget (`/K << /Type /OBJR /Obj N 0 R >>`), so the widget objects and the parent field dictionaries behind them survived the save, `/V` values included, in a file with no live field on any page. Every widget object no page lists after the bake is now replaced with `null` (`redact.drop_baked_widget_objects`); the parent field dictionaries are then unreferenced and collected on save. A widget still on a page is left alone. The structure tree stays, its object references resolving to null. The page renders the same. |
-| 0.9.3 | 8 | No new ops, no wire-surface change. `remove_text` no longer keeps a word it removed cleanly. Its verify step compares every character on the page before and after, keyed by character, origin (rounded to 0.01 pt) and drawing properties. When MuPDF rewrites a text run to drop the target's glyphs, the glyphs it keeps can come back a few millionths of a point from where they were (measured 138.394989 -> 138.395004 on pymupdf 1.28.2), which tips the rounded key one step, so an untouched glyph read as lost and the word was reported `kept`. On a synthetic 11pt line this happened for 14 of 80 random positions when the target was a run's first word. Keys now pair when their character and properties match and their origins are within one rounding step (`KEY_STEPS`), exact partners first and one to one. A glyph really lost or a target glyph really left still fails the check. |
+| 0.10.0 | **9** | Adds `render_removed` (+ `render_removed_h`): a page rendered as it would look with some text removed, and the boxes of any other character that removal took, so a client can compare it with the page's own render and tell which characters change nothing when they go. `trace_text` (+ `_h`) gains, for words a later fill, shading or image reaches into, each character's box (`chars`), and the page gains the later draws themselves (`covers`). `remove_text` entries on `apply_redactions` (+ `_h`) may name some of a word's characters (`chars`), removed and verified below word scale, for a word a drawn box covers only part of. **And** `remove_text` no longer keeps a word it removed cleanly: its verify step keys every character by character, origin (rounded to 0.01 pt) and drawing properties, and when MuPDF rewrites a text run to drop the target's glyphs, the glyphs it keeps can come back a few millionths of a point from where they were (measured 138.394989 -> 138.395004 on pymupdf 1.28.2), which tipped the rounded key one step, so an untouched glyph read as lost and the word was reported `kept` (14 of 80 random positions of a run's first word on a synthetic 11pt line). Keys now pair when their character and properties match and their origins are within one rounding step (`KEY_STEPS`), exact partners first and one to one. A glyph really lost or a target glyph really left still fails the check. Additive; the supported set widens to {2, 3, 4, 5, 6, 7, 8, 9}. |
 | 0.6.8 | **5** | Adds `render_clip` and `list_annotations` (v5+). **Bumps the protocol version, departing from the additive-no-bump precedent set at 0.6.0/0.6.3** — deliberately. Those additions were optional enhancements a client could simply not call; these two back a closed-app export-integrity gate that fails CLOSED, so a client built against them has no safe degraded mode. Advertising 5 lets that client detect an too-old subprocess from the startup banner and refuse to start, instead of discovering it as a per-export refusal once a user is mid-document. The supported set widens to {2, 3, 4, 5}, so every existing client — including the closed app, which declares 2 on stateless calls — is unaffected. |

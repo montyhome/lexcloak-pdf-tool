@@ -794,7 +794,7 @@ def test_the_report_carries_counts_and_never_text():
 
 def test_the_op_is_registered_and_the_protocol_advertises_it():
     assert "residue_report" in _OPS
-    assert PROTOCOL_VERSION == 8 and 8 in SUPPORTED_PROTOCOL_VERSIONS
+    assert PROTOCOL_VERSION >= 8 and 8 in SUPPORTED_PROTOCOL_VERSIONS
     assert {2, 3, 4, 5, 6, 7} <= SUPPORTED_PROTOCOL_VERSIONS
 
 

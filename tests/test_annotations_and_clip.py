@@ -303,7 +303,7 @@ class TestOpDispatch:
             _OPS["render_clip"]({"pdf_b64": _b64(_plain_doc()), "page": 0,
                                  "clip": clip})
 
-    def test_protocol_version_advertises_8_and_still_supports_older(self):
-        assert PROTOCOL_VERSION == 8
-        assert {2, 3, 4, 5, 6, 7}.issubset(SUPPORTED_PROTOCOL_VERSIONS)
-        assert 8 in SUPPORTED_PROTOCOL_VERSIONS
+    def test_protocol_version_advertises_9_and_still_supports_older(self):
+        assert PROTOCOL_VERSION == 9
+        assert {2, 3, 4, 5, 6, 7, 8}.issubset(SUPPORTED_PROTOCOL_VERSIONS)
+        assert 9 in SUPPORTED_PROTOCOL_VERSIONS
