@@ -532,6 +532,71 @@ def _save_encrypted(doc, password: str) -> tuple[bytes, bool]:
         return _save_clean(doc), False
 
 
+def _page_boxes(page, pg_matches: list[dict], redact_label: str) -> list[tuple]:
+    """``(rect, edge strips, label, font size)`` for each match on ``page``,
+    in the frame ``add_redact_annot`` takes, in payload order."""
+    page_rect = Rect(page.rect)  # as-rendered (rotation-applied) box
+    boxes = []
+    for m in pg_matches:
+        r = m["rect"]
+        rect = Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+        box_h = rect.height
+        font_size = min(11, max(5, box_h * 0.7))
+        # Off-page scrub strips for rects flush against a page edge --
+        # computed in the as-rendered frame BEFORE derotation so the
+        # flush test runs against the same box the app's rects live in
+        # (see _edge_overscan_strips).
+        strips = _edge_overscan_strips(rect, page_rect)
+        # Match rects arrive in the app's as-rendered (rotation-applied)
+        # space -- the frame render_page / page_size / OCR geometry all
+        # share. ``add_redact_annot`` instead interprets its rect in the
+        # page's *native* (unrotated, MediaBox-origin) space, so on a
+        # ``/Rotate`` page an untransformed burn lands displaced
+        # (point-mirrored at 180, transposed at 90/270) -- privacy-grade
+        # on the landscape legal / medical pages that carry rotation
+        # flags. ``_derotate_to_native`` is the two-step transform
+        # (derotation + MediaBox-origin shift), pinned by affine-fit /
+        # invert ground truth against the strict goldens -- see its
+        # docstring. ``font_size`` keeps the as-rendered ``box_h`` so the
+        # label tracks the visible box. Extraction-verified (fill AND
+        # text-scrub, both pymupdf lines).
+        if page.rotation:
+            rect = _derotate_to_native(rect, page)
+            strips = [_derotate_to_native(s, page) for s in strips]
+        # Per-match label (v0.6.4) overrides the document-level one for
+        # THIS box only -- what lets one person's boxes carry a pseudonym
+        # ("Patient A") while the rest of the document keeps its default.
+        # Absent and empty-string both mean "no per-match label, use the
+        # document one": ``redact_label=""`` already means "plain black
+        # box" document-wide, so giving the same value a second, inverted
+        # meaning per-match ("suppress the document label here") would be
+        # a trap. A payload carrying no per-match labels therefore takes
+        # byte-identical decisions to v0.6.3.
+        label = m.get("redact_label") or redact_label
+        boxes.append((rect, strips, label, font_size))
+    return boxes
+
+
+def _add_burn_annots(page, boxes: list[tuple]) -> None:
+    """Add the burn's redaction annotations for ``boxes`` (see _page_boxes):
+    each box's edge strips, then the box, black, labelled when it has one."""
+    for rect, strips, label, font_size in boxes:
+        for s in strips:
+            page.add_redact_annot(s, fill=(0, 0, 0))
+        if label:
+            page.add_redact_annot(
+                rect,
+                text=label,
+                fontname="helv",
+                fontsize=font_size,
+                text_color=(1, 1, 1),
+                fill=(0, 0, 0),
+                align=TEXT_ALIGN_CENTER,
+            )
+        else:
+            page.add_redact_annot(rect, fill=(0, 0, 0))
+
+
 def _apply_redactions_doc(doc, matches: list[dict],
                           redact_label: str = "",
                           active_categories: list[str] | set[str] | None = None,
@@ -541,6 +606,7 @@ def _apply_redactions_doc(doc, matches: list[dict],
                           output_protection: dict | None = None,
                           remove_text: list | None = None,
                           removal_sink: dict | None = None,
+                          keep_uncovered_lines: bool = False,
                           ) -> tuple[bytes, bool]:
     """Apply redactions to an open ``pymupdf.Document`` and return (bytes, protected).
 
@@ -572,7 +638,15 @@ def _apply_redactions_doc(doc, matches: list[dict],
     removed with no fill and no change to images or graphics, before the
     matches are burned (see ``remove_text.py``). The outcome -- which boxes
     were removed and which had to be kept -- is written to ``removal_sink``.
+
+    ``keep_uncovered_lines`` (v0.11.0) keeps the glyphs of a line a box does
+    not reach: plain visible text whose ink lies wholly above or below the
+    box, which MuPDF's filter takes when the box reaches into the glyph's
+    ascender-to-descender box. The fill, images and graphics still use the
+    box unchanged, and the old text removal stays the floor. Default False:
+    the historical burn, byte for byte. See ``keep_lines.py``.
     """
+    from .keep_lines import burn_keeping_lines
     from .remove_text import remove_text_doc, validate_remove_text
 
     _validate_redaction_payload(matches, removed_pages, blackout_pages)
@@ -611,57 +685,15 @@ def _apply_redactions_doc(doc, matches: list[dict],
 
     for pg_num, pg_matches in by_page.items():
         page = doc[pg_num]
-        page_rect = Rect(page.rect)  # as-rendered (rotation-applied) box
-        for m in pg_matches:
-            r = m["rect"]
-            rect = Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-            box_h = rect.height
-            font_size = min(11, max(5, box_h * 0.7))
-            # Off-page scrub strips for rects flush against a page edge --
-            # computed in the as-rendered frame BEFORE derotation so the
-            # flush test runs against the same box the app's rects live in
-            # (see _edge_overscan_strips).
-            strips = _edge_overscan_strips(rect, page_rect)
-            # Match rects arrive in the app's as-rendered (rotation-applied)
-            # space -- the frame render_page / page_size / OCR geometry all
-            # share. ``add_redact_annot`` instead interprets its rect in the
-            # page's *native* (unrotated, MediaBox-origin) space, so on a
-            # ``/Rotate`` page an untransformed burn lands displaced
-            # (point-mirrored at 180, transposed at 90/270) -- privacy-grade
-            # on the landscape legal / medical pages that carry rotation
-            # flags. ``_derotate_to_native`` is the two-step transform
-            # (derotation + MediaBox-origin shift), pinned by affine-fit /
-            # invert ground truth against the strict goldens -- see its
-            # docstring. ``font_size`` keeps the as-rendered ``box_h`` so the
-            # label tracks the visible box. Extraction-verified (fill AND
-            # text-scrub, both pymupdf lines).
-            if page.rotation:
-                rect = _derotate_to_native(rect, page)
-                strips = [_derotate_to_native(s, page) for s in strips]
-            for s in strips:
-                page.add_redact_annot(s, fill=(0, 0, 0))
-            # Per-match label (v0.6.4) overrides the document-level one for
-            # THIS box only -- what lets one person's boxes carry a pseudonym
-            # ("Patient A") while the rest of the document keeps its default.
-            # Absent and empty-string both mean "no per-match label, use the
-            # document one": ``redact_label=""`` already means "plain black
-            # box" document-wide, so giving the same value a second, inverted
-            # meaning per-match ("suppress the document label here") would be
-            # a trap. A payload carrying no per-match labels therefore takes
-            # byte-identical decisions to v0.6.3.
-            label = m.get("redact_label") or redact_label
-            if label:
-                page.add_redact_annot(
-                    rect,
-                    text=label,
-                    fontname="helv",
-                    fontsize=font_size,
-                    text_color=(1, 1, 1),
-                    fill=(0, 0, 0),
-                    align=TEXT_ALIGN_CENTER,
-                )
-            else:
-                page.add_redact_annot(rect, fill=(0, 0, 0))
+        boxes = _page_boxes(page, pg_matches, redact_label)
+        # v0.11.0: a box keeps the glyphs of a line it does not reach, which
+        # MuPDF's filter would otherwise take by their ascender/descender
+        # boxes (see keep_lines.py). Returns False, changing nothing, on a
+        # page where nothing would be kept; that page burns as before.
+        if keep_uncovered_lines and burn_keeping_lines(
+                doc, pg_num, boxes, _add_burn_annots):
+            continue
+        _add_burn_annots(page, boxes)
         page.apply_redactions()
 
     # Full-page blackout: cover each blackout page edge-to-edge
@@ -744,6 +776,7 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
                      output_protection: dict | None = None,
                      remove_text: list | None = None,
                      removal_sink: dict | None = None,
+                     keep_uncovered_lines: bool = False,
                      ) -> tuple[bytes, bool]:
     """Black-box redact enabled matches, return (new PDF bytes, protection_applied).
 
@@ -779,6 +812,9 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
         Modes "same"/"new" require a non-empty password. Re-encryption
         failures fall back to unprotected output rather than blocking the
         download (``protection_applied=False`` signals this).
+    keep_uncovered_lines
+        Keep the text of a line a box does not reach (v0.11.0; see
+        ``_apply_redactions_doc``). Default False, the historical burn.
 
     Returns
     -------
@@ -809,6 +845,7 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
             output_protection=output_protection,
             remove_text=remove_text,
             removal_sink=removal_sink,
+            keep_uncovered_lines=keep_uncovered_lines,
         )
     finally:
         doc.close()

@@ -422,6 +422,7 @@ Black-box redactions, optional metadata strip, optional re-encryption.
 | `removed_pages` | list of ints \| null | null |
 | `output_protection` | dict \| null | null |
 | `remove_text` *(v7+)* | list of word dicts \| null | null |
+| `keep_uncovered_lines` *(0.11.0+)* | bool | `false` |
 
 Match-dict shape:
 ```json
@@ -481,6 +482,27 @@ the set fails, the part is halved until each half is removed cleanly or is a
 single character no band separates. That character is left and the entry is
 reported `kept`, while what could be separated is removed. An older
 subprocess ignores the field and removes the whole word.
+
+`keep_uncovered_lines` (0.11.0+) keeps the text of a line a box does not
+reach. MuPDF removes a glyph when a box reaches a tenth of the way into the
+glyph's box, and that box runs from the font's ascender to its descender, so
+a box over one line can take letters from the next line without touching
+their ink: a heading just below a redacted name, or the next line of
+single-spaced text under a value with a descender. With the flag set, a
+glyph is kept when every box that reaches into its glyph box lies wholly
+above or wholly below the ink of the glyphs that box touches on its line
+(measured from the glyph outlines). Only plainly drawn text is kept: render
+mode 0, 1 or 2, opacity above zero, in no optional-content group, drawn once
+at its origin, on a left-to-right line of a page with no `/Rotate`. Text is
+then removed with each box trimmed clear of the kept lines, and the boxes
+are drawn and applied to images and graphics unchanged, in a second pass
+that leaves text alone. The old text removal is the floor: it is tried on a
+one-page copy of the result, and if it would still take any character other
+than a kept one, it is applied to the page. A kept glyph can sit under the
+half point of border the burn draws around each box, over the top of its
+tallest letters; it is still text. A page on which nothing is kept burns
+exactly as without the flag, and so does every page when the flag is
+absent. An older subprocess ignores the field and burns the old way.
 
 **Result:** `{"pdf_b64": str, "protection_applied": bool}`, plus, **exactly
 when the request carried `remove_text`**, `"text_removal": {"removed":
@@ -832,4 +854,5 @@ shipping client has caught up.
 | 0.9.1 | 8 | No new ops, no wire-surface change. `apply_redactions` (+ `_h`) and `reduce_size` no longer fail on a PDF whose xref leaves an object number undefined (its `/Size` exceeds what the xref sections cover, which is common in linearized files carrying an incremental update). PyMuPDF's `Document.scrub` walks every number for `javascript=True` / `xml_metadata=True` and raised `cannot find object in xref` on the first undefined one, so every export of such a file failed, with or without boxes. That walk now runs in the package (`redact.scrub_objects`) and passes over only the numbers `pdf_object_exists` reports undefined, which have no body and are written as free entries on save; a defined object that fails to load still raises. JavaScript and XMP removal are unchanged. `reduce_size_h` was not affected: it saves before it scrubs, and the save rebuilds the xref. |
 | 0.9.2 | 8 | No new ops, no wire-surface change. Flattening a tagged form in `apply_redactions` (+ `_h`) now leaves no widget object in the file. `bake(widgets=True)` takes each widget off its page, but a tagged form's structure tree points at every widget (`/K << /Type /OBJR /Obj N 0 R >>`), so the widget objects and the parent field dictionaries behind them survived the save, `/V` values included, in a file with no live field on any page. Every widget object no page lists after the bake is now replaced with `null` (`redact.drop_baked_widget_objects`); the parent field dictionaries are then unreferenced and collected on save. A widget still on a page is left alone. The structure tree stays, its object references resolving to null. The page renders the same. |
 | 0.10.0 | **9** | Adds `render_removed` (+ `render_removed_h`): a page rendered as it would look with some text removed, and the boxes of any other character that removal took, so a client can compare it with the page's own render and tell which characters change nothing when they go. `trace_text` (+ `_h`) gains, for words a later fill, shading or image reaches into, each character's box (`chars`), and the page gains the later draws themselves (`covers`). `remove_text` entries on `apply_redactions` (+ `_h`) may name some of a word's characters (`chars`), removed and verified below word scale, for a word a drawn box covers only part of. **And** `remove_text` no longer keeps a word it removed cleanly: its verify step keys every character by character, origin (rounded to 0.01 pt) and drawing properties, and when MuPDF rewrites a text run to drop the target's glyphs, the glyphs it keeps can come back a few millionths of a point from where they were (measured 138.394989 -> 138.395004 on pymupdf 1.28.2), which tipped the rounded key one step, so an untouched glyph read as lost and the word was reported `kept` (14 of 80 random positions of a run's first word on a synthetic 11pt line). Keys now pair when their character and properties match and their origins are within one rounding step (`KEY_STEPS`), exact partners first and one to one. A glyph really lost or a target glyph really left still fails the check. Additive; the supported set widens to {2, 3, 4, 5, 6, 7, 8, 9}. |
+| 0.11.0 | 9 | `apply_redactions` (+ `_h`) gains the optional `keep_uncovered_lines` (default `false`, so every existing client gets the historical burn, verified identical by page text and render on a multi-page document, labelled and unlabelled). With it, a box keeps the glyphs of a line it does not reach: MuPDF's filter takes a glyph when a box reaches a tenth of the way into its ascender-to-descender box (measured at 7, 12 and 24 pt on pymupdf 1.28.2), so a box over one line removed letters of the line below whose ink it never touched. Only plainly drawn, horizontal text on an unrotated page is kept; the fill, images and graphics use the box unchanged; and the old text removal, tried on a one-page copy of the result, is the floor. A non-boolean value is a `ValueError`. No new ops; `PROTOCOL_VERSION` stays 9 and an older subprocess ignores the field. |
 | 0.6.8 | **5** | Adds `render_clip` and `list_annotations` (v5+). **Bumps the protocol version, departing from the additive-no-bump precedent set at 0.6.0/0.6.3** — deliberately. Those additions were optional enhancements a client could simply not call; these two back a closed-app export-integrity gate that fails CLOSED, so a client built against them has no safe degraded mode. Advertising 5 lets that client detect an too-old subprocess from the startup banner and refuse to start, instead of discovering it as a per-export refusal once a user is mid-document. The supported set widens to {2, 3, 4, 5}, so every existing client — including the closed app, which declares 2 on stateless calls — is unaffected. |
