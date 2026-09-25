@@ -492,6 +492,15 @@ def _redaction_result(out_bytes: bytes, protection_applied: bool,
     return result
 
 
+def _keep_uncovered_lines(cmd: dict) -> bool:
+    """The optional ``keep_uncovered_lines`` flag (v0.11.0); absent is False."""
+    value = cmd.get("keep_uncovered_lines", False)
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"keep_uncovered_lines must be a boolean, got {type(value).__name__}")
+    return value
+
+
 def _op_apply_redactions(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     matches = cmd.get("matches") or []
@@ -512,6 +521,7 @@ def _op_apply_redactions(cmd: dict) -> dict:
         output_protection=output_protection,
         remove_text=remove_text,
         removal_sink=removal,
+        keep_uncovered_lines=_keep_uncovered_lines(cmd),
     )
     return _redaction_result(out_bytes, protection_applied, remove_text, removal)
 
@@ -873,6 +883,7 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
         output_protection=output_protection,
         remove_text=remove_text,
         removal_sink=removal,
+        keep_uncovered_lines=_keep_uncovered_lines(cmd),
     )
     return _redaction_result(out_bytes, protection_applied, remove_text, removal)
 
