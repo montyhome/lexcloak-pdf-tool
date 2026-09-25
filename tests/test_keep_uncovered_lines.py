@@ -181,12 +181,38 @@ def test_heading_renders_as_in_the_source():
     assert _pixels(out, heading) == _pixels(src, heading)
 
 
+#: A rule wholly inside the box over ``NAME`` in ``_heading_pdf``: the burn
+#: removes line art a box covers.
+_UNDERLINE = ((75, 90.6), (120, 90.6))
+
+
 def _furniture(page) -> None:
-    """An image and a rule under the banner, for the fill/image/graphics pass."""
+    """An image and two rules under the banner, one of them wholly under the
+    box, for the fill/image/graphics pass."""
     pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 40, 10), False)
     pix.set_rect(pix.irect, (200, 40, 40))
     page.insert_image(pymupdf.Rect(60, 83, 170, 93), pixmap=pix)
     page.draw_line((45, 91.5), (300, 91.5), color=(0, 0, 1), width=0.4)
+    page.draw_line(*_UNDERLINE, color=(0, 0.5, 0), width=0.3)
+
+
+def _drawn(pdf: bytes) -> list[tuple]:
+    doc = pymupdf.open(stream=pdf)
+    try:
+        return sorted((tuple(round(v, 2) for v in d["rect"]), d.get("color"), d.get("fill"))
+                      for d in doc[0].get_drawings())
+    finally:
+        doc.close()
+
+
+def test_line_art_under_the_box_goes_as_in_the_default_burn():
+    pdf, box = _heading_pdf(extras=_furniture)
+    assert box.contains(pymupdf.Rect(_UNDERLINE[0], _UNDERLINE[1]))
+    green = [d for d in _drawn(pdf) if d[1] == (0.0, 0.5, 0.0)]
+    assert green                                     # the fixture draws it
+    default = _drawn(_burn(pdf, [_match(box)], keep=False))
+    assert not [d for d in default if d[1] == (0.0, 0.5, 0.0)]   # and the burn removes it
+    assert _drawn(_burn(pdf, [_match(box)], keep=True)) == default
 
 
 def test_fill_images_and_graphics_are_the_default_burns():
@@ -228,7 +254,48 @@ def test_label_is_drawn_on_the_box():
     assert HEADING in _text(out)
 
 
+#: A line with no descenders, so a box can reach into its glyph boxes from
+#: below without meeting its ink.
+FLAT = "The notes were read and all is as noted."
+
+
+def _flat_above_pdf() -> tuple[bytes, pymupdf.Rect, float]:
+    """``FLAT`` then ``MIDDLE``, single-spaced at 11 pt; the box over
+    ``NAME``, and ``FLAT``'s ink bottom over the box's width."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((72, 200), FLAT, fontsize=11)
+    page.insert_text((72, 211), MIDDLE, fontsize=11)
+    box = _ink_box(page, NAME)
+    bottom = max(ch["bbox"][3]
+                 for b in page.get_text("rawdict", flags=_ACCURATE)["blocks"]
+                 for ln in b.get("lines", []) for s in ln["spans"] for ch in s["chars"]
+                 if ch["origin"][1] < 205 and ch["bbox"][2] > box.x0 and ch["bbox"][0] < box.x1)
+    data = doc.tobytes()
+    doc.close()
+    return data, box, bottom
+
+
+def test_line_above_is_kept_when_the_box_stops_below_its_ink():
+    """A taller box (a region drawn by hand, say) that rises into the line
+    above's glyph boxes but stays under its ink keeps that line."""
+    pdf, box, bottom = _flat_above_pdf()
+    tall = pymupdf.Rect(box.x0, bottom + 0.3, box.x1, box.y1)
+    assert FLAT not in _text(_burn(pdf, [_match(tall)], keep=False))
+    out = _burn(pdf, [_match(tall)], keep=True)
+    assert FLAT in _text(out)
+    assert "Priya" not in _traced(out)
+
+
 # ══ Unhappy paths: where the old rule must still decide ══
+
+
+def test_box_reaching_the_line_above_ink_still_takes_it():
+    pdf, box, bottom = _flat_above_pdf()
+    reaching = pymupdf.Rect(box.x0, bottom - 0.3, box.x1, box.y1)
+    kept = _text(_burn(pdf, [_match(reaching)], keep=True))
+    assert kept == _text(_burn(pdf, [_match(reaching)], keep=False))
+    assert FLAT not in kept
 
 
 def test_box_reaching_the_next_lines_ink_still_takes_it():
@@ -273,7 +340,14 @@ def _layered(page, point) -> None:
     page.insert_text(point, BELOW, fontsize=11, oc=ocg)
 
 
-@pytest.mark.parametrize("below", [_invisible, _layered], ids=["invisible", "layer"])
+def _twice(page, point) -> None:
+    """Drawn twice at the same origins, as some producers fake bold."""
+    page.insert_text(point, BELOW, fontsize=11)
+    page.insert_text(point, BELOW, fontsize=11)
+
+
+@pytest.mark.parametrize("below", [_invisible, _layered, _twice],
+                         ids=["invisible", "layer", "twice"])
 def test_text_that_is_not_plainly_drawn_keeps_the_old_rule(below):
     pdf, box = _body_pdf(below=below)
     assert _traced(_burn(pdf, [_match(box)], keep=True)) == \
