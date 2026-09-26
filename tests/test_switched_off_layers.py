@@ -568,6 +568,23 @@ def test_arrays_and_the_configuration_may_be_written_as_references():
         assert trace_text(build(indirect), 0) == direct, indirect
 
 
+def test_a_base_state_written_as_a_reference_is_read_as_the_name():
+    def build(base: str | None) -> bytes:
+        b = Built()
+        g = b.group("Notes")
+        b.prop("MC0", g)
+        state = "/OFF" if base is None else _indirect(b, base)
+        b.config(f"<</OCGs[{g} 0 R]/D<</BaseState {state}/ON[]>>>>")
+        return b.finish(marked("MC0", text(60, 400, HIDDEN)))
+
+    direct = trace_text(build(None), 0)
+    assert _words(direct)[HIDDEN]["layer_off"] is True
+    assert trace_text(build("/OFF"), 0) == direct
+    with pytest.raises(LayerReadError) as caught:
+        trace_text(build("(OFF)"), 0)
+    assert str(caught.value) == "/D /BaseState is not a name"
+
+
 def test_a_reference_to_an_array_that_is_not_one_still_fails_the_page():
     b = Built()
     g = b.group("Notes")
