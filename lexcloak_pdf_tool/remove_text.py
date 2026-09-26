@@ -51,7 +51,7 @@ import pymupdf as _pymupdf
 
 from .redact import Rect, _derotate_to_native
 from .render import _render_page_doc
-from .trace import _restore_layers, _span_words, _switch_layers_on
+from .trace import _every_layer_drawn, _has_layers, _span_words
 
 #: Band heights tried, as shares of a word box's height, narrowest first.
 BANDS = (0.1, 0.3, 0.6)
@@ -125,11 +125,11 @@ def _apply(page, bands) -> None:
 
 
 def _keys_with_layers_on(doc, page_index: int) -> tuple[list[dict], Counter]:
-    _, restore = _switch_layers_on(doc)
-    try:
-        words = _page_words(doc[page_index])
-    finally:
-        _restore_layers(doc, restore)
+    """The page's words and character keys with every optional-content group
+    drawn, exactly as ``trace_text`` reads them, so a word it reported is
+    found here with the same ``layer``."""
+    with _every_layer_drawn(doc, page_index) as page:
+        words = _page_words(page)
     return words, Counter(k for w in words for k in w["keys"])
 
 
@@ -353,15 +353,13 @@ def remove_text_doc(doc, by_page: dict[int, list[dict]],
 def _copy_for_render(doc, pno: int):
     """A copy to remove text from and render, drawn exactly like ``doc``.
 
-    One page is enough, and cheap, unless the document has optional-content
-    groups: a one-page copy loses the document's layer configuration and
-    draws a switched-off layer, so then the whole document is copied.
+    One page is enough, and cheap, unless the document has optional content:
+    a one-page copy loses the document's layer configuration and draws a
+    switched-off layer, so then the whole document is copied. Whether it has
+    any is read from ``/OCProperties`` itself, never from ``get_ocgs()``,
+    which can list no group while the configuration still switches one off.
     """
-    try:
-        layered = bool(doc.get_ocgs())
-    except Exception:  # noqa: BLE001 -- a broken /OCProperties: copy it all
-        layered = True
-    if layered or len(doc) == 1:
+    if _has_layers(doc) or len(doc) == 1:
         return _pymupdf.open(stream=doc.tobytes(), filetype="pdf")
     copy = _pymupdf.open()
     copy.insert_pdf(doc, from_page=pno, to_page=pno)

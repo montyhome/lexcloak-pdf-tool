@@ -1,10 +1,11 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.6.8 ships
-protocol version 5.** v2 + v3 + v4 stay in the supported set so a v5
-subprocess serves older clients cleanly during rolling closed-app
-upgrades.
+parent via length-prefixed JSON frames over stdin/stdout. **v0.11.1 ships
+protocol version 9.** Every earlier version from 2 stays in the supported
+set ({2, 3, 4, 5, 6, 7, 8, 9}) so a current subprocess serves older clients
+cleanly during rolling client upgrades. The table under **Versioning**
+records what each version added.
 
 There are two protocol modes (the subprocess speaks both simultaneously):
 
@@ -277,12 +278,31 @@ render of the page. It makes no judgement about visibility itself.
 - `mode` is the text render mode (0 fill, 1 stroke, 2 fill+stroke,
   3 invisible, 4–7 the same with clipping).
 - `opacity` is the fill alpha in effect for the word.
-- `layer` is the optional-content group the word belongs to (`""` for none),
-  and `layer_off` says whether that group is off in the document's current
-  configuration. Words in switched-off groups are included; the op switches
-  such groups on through the UI configuration while it reads, and restores
-  the configuration before returning, so a handle's later renders are
-  unchanged.
+- `layer` is the optional-content group that marks the word, the innermost
+  one where marks nest (`""` for none). `layer_off` *(widened in 0.11.1)* is
+  true when the page, as the document opens, does not draw the word because
+  of optional content — whatever the reason: a group switched off by the
+  default configuration (`/BaseState`, `/ON`, `/OFF`) whether or not it
+  carries `/Usage` or appears in `/Order`, an enclosing group that is off
+  around one that is on, a form XObject whose own `/OC` is off, a group off by
+  its `/Usage` or `/Intent`, or a membership dictionary (`/OCMD`) that
+  evaluates off. MuPDF decides, exactly as it does when rendering the page,
+  so a word the page's default render draws is never `layer_off`; where
+  MuPDF's evaluation of a membership dictionary differs from another viewer's,
+  the render and `layer_off` still agree with each other.
+  Words the page does not draw are included: they are read from a one-page
+  copy with no `/OCProperties`, which draws all optional content, and
+  compared character by character with the page as it opens. The document
+  or handle is never changed.
+- A page whose `/OCProperties` is not the shape the PDF specification gives
+  it (not a dictionary; `/OCGs` not an array of group dictionaries; no `/D`
+  dictionary; `/ON`, `/OFF`, `/Order`, `/Locked`, `/AS` or `/RBGroups` not an
+  array; `/BaseState` not a name) is refused with `LayerReadError` rather
+  than read as having no layers, and so is a page whose copy does not
+  reproduce every character the page draws by default. Neither message
+  carries document text. Before 0.11.1 a broken `/OCProperties` read as "no
+  layers", and a group without both `/Usage` and an `/Order` entry, or off
+  only through nesting, a form or an `/OCMD`, was left out of the trace.
 - `clipped` is true when no character of the word appears in MuPDF's
   clip-respecting extraction: it lies outside a clipping path or outside the
   page. Characters are matched by character and origin.
@@ -308,7 +328,8 @@ render of the page. It makes no judgement about visibility itself.
   the caller the render to compare with.
 
 Words are split on whitespace within each span, in content-stream order.
-`IndexError` for a page out of range.
+`IndexError` for a page out of range (checked before any layer is read),
+`LayerReadError` for optional content that cannot be read.
 
 ### `render_removed`  *(v9+)*
 
@@ -344,8 +365,9 @@ Each `remove` entry has the `remove_text` shape above without `page`
   removal would really take. `kept` is the box of each named character that
   even the widest band left: its render proves nothing about whether it shows.
 - `missed` is the index of each entry whose word was not found.
-- The removal runs on a copy of the whole document: a one-page copy would
-  lose the document's optional-content configuration and draw a
+- The removal runs on a copy of the whole document when the document has
+  `/OCProperties` (read from the catalog, not from the groups MuPDF lists): a
+  one-page copy would lose the optional-content configuration and draw a
   switched-off layer. The document or handle is not changed.
 
 `ValueError` for a missing or malformed `remove`, `IndexError` for a page out
@@ -855,4 +877,5 @@ shipping client has caught up.
 | 0.9.2 | 8 | No new ops, no wire-surface change. Flattening a tagged form in `apply_redactions` (+ `_h`) now leaves no widget object in the file. `bake(widgets=True)` takes each widget off its page, but a tagged form's structure tree points at every widget (`/K << /Type /OBJR /Obj N 0 R >>`), so the widget objects and the parent field dictionaries behind them survived the save, `/V` values included, in a file with no live field on any page. Every widget object no page lists after the bake is now replaced with `null` (`redact.drop_baked_widget_objects`); the parent field dictionaries are then unreferenced and collected on save. A widget still on a page is left alone. The structure tree stays, its object references resolving to null. The page renders the same. |
 | 0.10.0 | **9** | Adds `render_removed` (+ `render_removed_h`): a page rendered as it would look with some text removed, and the boxes of any other character that removal took, so a client can compare it with the page's own render and tell which characters change nothing when they go. `trace_text` (+ `_h`) gains, for words a later fill, shading or image reaches into, each character's box (`chars`), and the page gains the later draws themselves (`covers`). `remove_text` entries on `apply_redactions` (+ `_h`) may name some of a word's characters (`chars`), removed and verified below word scale, for a word a drawn box covers only part of. **And** `remove_text` no longer keeps a word it removed cleanly: its verify step keys every character by character, origin (rounded to 0.01 pt) and drawing properties, and when MuPDF rewrites a text run to drop the target's glyphs, the glyphs it keeps can come back a few millionths of a point from where they were (measured 138.394989 -> 138.395004 on pymupdf 1.28.2), which tipped the rounded key one step, so an untouched glyph read as lost and the word was reported `kept` (14 of 80 random positions of a run's first word on a synthetic 11pt line). Keys now pair when their character and properties match and their origins are within one rounding step (`KEY_STEPS`), exact partners first and one to one. A glyph really lost or a target glyph really left still fails the check. Additive; the supported set widens to {2, 3, 4, 5, 6, 7, 8, 9}. |
 | 0.11.0 | 9 | `apply_redactions` (+ `_h`) gains the optional `keep_uncovered_lines` (default `false`, so every existing client gets the historical burn, verified identical by page text and render on a multi-page document, labelled and unlabelled). With it, a box keeps the glyphs of a line it does not reach: MuPDF's filter takes a glyph when a box reaches a tenth of the way into its ascender-to-descender box (measured at 7, 12 and 24 pt on pymupdf 1.28.2), so a box over one line removed letters of the line below whose ink it never touched. Only plainly drawn, horizontal text on an unrotated page is kept; the fill, images and graphics use the box unchanged; and the old text removal, tried on a one-page copy of the result, is the floor. A non-boolean value is a `ValueError`. No new ops; `PROTOCOL_VERSION` stays 9 and an older subprocess ignores the field. |
+| 0.11.1 | 9 | No new ops, no wire-surface change. `trace_text` (+ `_h`) now reports every word the page leaves undrawn because of optional content as `layer_off`, and `remove_text` (on `apply_redactions` + `_h`), `render_removed` and `keep_uncovered_lines` read the same words. Before, a switched-off group was seen only when it carried a `/Usage` dictionary **and** sat in `/OCProperties /D /Order`, both optional in the PDF specification: MuPDF's `get_ocgs()` reads a group without `/Usage` as on, and its viewer layer list holds only `/Order` groups, so any other switched-off group — and a word off only through an enclosing group, a form's own `/OC`, `/Usage`/`/Intent` or an `/OCMD` — was left out of the trace entirely and reported as nothing. Words are now read from a one-page copy with no `/OCProperties`, which draws all optional content, and a word none of whose characters the page draws as it opens is `layer_off`: MuPDF decides, as it does when it renders the page, so a drawn word is never `layer_off`, and two groups sharing a name no longer read as one. A page with a malformed `/OCProperties` raises `LayerReadError` instead of reading as unlayered. `render_removed` decides whether to copy the whole document from `/OCProperties` itself. `PROTOCOL_VERSION` stays 9. |
 | 0.6.8 | **5** | Adds `render_clip` and `list_annotations` (v5+). **Bumps the protocol version, departing from the additive-no-bump precedent set at 0.6.0/0.6.3** — deliberately. Those additions were optional enhancements a client could simply not call; these two back a closed-app export-integrity gate that fails CLOSED, so a client built against them has no safe degraded mode. Advertising 5 lets that client detect an too-old subprocess from the startup banner and refuse to start, instead of discovering it as a per-export refusal once a user is mid-document. The supported set widens to {2, 3, 4, 5}, so every existing client — including the closed app, which declares 2 on stateless calls — is unaffected. |
