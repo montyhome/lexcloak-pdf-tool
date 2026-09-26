@@ -402,6 +402,12 @@ BROKEN = [
     ("off-not-an-array", "<</OCGs[{G0}]/D<</OFF 3>>>>", "/D /OFF is not an array"),
     ("base-state-not-a-name", "<</OCGs[{G0}]/D<</BaseState(OFF)>>>>", "/D /BaseState is not a name"),
     ("dangling-group", "<</OCGs[9999 0 R]/D<<>>>>", "an /OCGs entry is not a group dictionary"),
+    ("dangling-ocgs", "<</OCGs 9999 0 R/D<<>>>>", "/OCProperties /OCGs is not an array"),
+    # Listing no group excuses only a MISSING /D, never a malformed one.
+    ("no-groups-d-not-a-dictionary", "<</D 3>>", "/OCProperties lacks a default configuration /D"),
+    ("no-groups-off-not-an-array", "<</D<</OFF 3>>>>", "/D /OFF is not an array"),
+    ("empty-ocgs-base-state-not-a-name", "<</OCGs[]/D<</BaseState 1>>>>",
+     "/D /BaseState is not a name"),
 ]
 
 
@@ -461,6 +467,133 @@ def test_a_copy_that_loses_default_drawn_text_fails_the_page(monkeypatch):
         trace_text(_one_group("<</OCGs[{G0}]/D<</OFF[{G0}]>>>>"), 0)
     assert str(caught.value) == "the page with every layer drawn lost text it draws by default"
     blank.close()
+
+
+# ── Optional content that lists no group ────────────────────────────────
+
+#: (id, ocprops) — ``/OCProperties`` naming no group. The first is the shape
+#: that turned up in the wild: no ``/OCGs`` and an empty ``/D``.
+NO_GROUPS = [
+    ("no-ocgs-empty-d", "<</D<<>>>>"),
+    ("empty-dictionary", "<<>>"),
+    ("empty-ocgs-no-d", "<</OCGs[]>>"),
+    ("empty-ocgs-empty-d", "<</OCGs[]/D<<>>>>"),
+    ("no-ocgs-base-state-off", "<</D<</BaseState/OFF>>>>"),
+    ("null-ocgs", "<</OCGs null/D<<>>>>"),
+]
+
+
+def _plain_page(ocprops: str | None) -> bytes:
+    b = Built()
+    if ocprops is not None:
+        b.config(ocprops)
+    return b.finish(text(60, 400, SHOWN))
+
+
+@pytest.mark.parametrize("ocprops", [c[1] for c in NO_GROUPS], ids=[c[0] for c in NO_GROUPS])
+def test_optional_content_that_lists_no_group_reads_as_the_page_without_it(ocprops):
+    """Nothing for a default configuration to switch off, so nothing is
+    refused: the trace is the one the same page gives with no
+    ``/OCProperties`` at all."""
+    assert trace_text(_plain_page(ocprops), 0) == trace_text(_plain_page(None), 0)
+
+
+@pytest.mark.parametrize("ocprops", [c[1] for c in NO_GROUPS], ids=[c[0] for c in NO_GROUPS])
+def test_optional_content_that_lists_no_group_is_still_compared(ocprops, monkeypatch):
+    """Listing no group is not taken on trust: the page still goes through
+    the comparison, so a view that lost default-drawn text would fail it."""
+    from contextlib import contextmanager
+
+    blank = pymupdf.open()
+    blank.new_page(width=612, height=792)
+
+    @contextmanager
+    def lossy(doc, pno):
+        yield blank[0]
+
+    monkeypatch.setattr(T, "_every_layer_drawn", lossy)
+    with pytest.raises(LayerReadError) as caught:
+        trace_text(_plain_page(ocprops), 0)
+    assert str(caught.value) == "the page with every layer drawn lost text it draws by default"
+    blank.close()
+
+
+#: (id, ocprops) — the word is marked by a group ``/OCGs`` does not list,
+#: which the default configuration names as off or leaves to ``/BaseState
+#: /OFF``. MuPDF draws such a group (so does PDFium), so the word is shown.
+UNLISTED = [
+    ("no-ocgs-off-names-it", "<</D<</OFF[{G0}]>>>>"),
+    ("empty-ocgs-off-names-it", "<</OCGs[]/D<</OFF[{G0}]>>>>"),
+    ("empty-ocgs-base-state-off", "<</OCGs[]/D<</BaseState/OFF>>>>"),
+    ("empty-ocgs-no-d", "<</OCGs[]>>"),
+    ("no-ocgs-empty-d", "<</D<<>>>>"),
+]
+
+
+@pytest.mark.parametrize("ocprops", [c[1] for c in UNLISTED], ids=[c[0] for c in UNLISTED])
+def test_a_word_in_a_group_no_array_lists_is_as_drawn_as_the_render_shows(ocprops):
+    pdf = _one_group(ocprops)
+    words = _words(trace_text(pdf, 0))
+    assert words[HIDDEN]["layer_off"] is False
+    assert _gray_at(pdf, words[HIDDEN]["bbox"]) < 128      # the render draws it
+    assert words[CONTROL]["layer_off"] is False
+
+
+def _indirect(b: Built, source: str) -> str:
+    """``source`` written as an object of its own, as a reference to it."""
+    return f"{b._obj(source)} 0 R"
+
+
+def test_arrays_and_the_configuration_may_be_written_as_references():
+    """Any value in a PDF may be a reference to an object. An /OCGs, a /D or
+    an /OFF so written is read like the same value written in place."""
+    def build(indirect: str) -> bytes:
+        b = Built()
+        g = b.group("Notes")
+        b.prop("MC0", g)
+        ocgs, off = f"[{g} 0 R]", f"[{g} 0 R]"
+        if indirect in ("ocgs", "all"):
+            ocgs = _indirect(b, ocgs)
+        if indirect in ("off", "all"):
+            off = _indirect(b, off)
+        d = f"<</OFF {off}>>"
+        if indirect in ("d", "all"):
+            d = _indirect(b, d)
+        b.config(f"<</OCGs {ocgs}/D {d}>>")
+        return b.finish(marked("MC0", text(60, 400, HIDDEN)))
+
+    direct = trace_text(build(""), 0)
+    assert _words(direct)[HIDDEN]["layer_off"] is True
+    for indirect in ("ocgs", "d", "off", "all"):
+        assert trace_text(build(indirect), 0) == direct, indirect
+
+
+def test_a_base_state_written_as_a_reference_is_read_as_the_name():
+    def build(base: str | None) -> bytes:
+        b = Built()
+        g = b.group("Notes")
+        b.prop("MC0", g)
+        state = "/OFF" if base is None else _indirect(b, base)
+        b.config(f"<</OCGs[{g} 0 R]/D<</BaseState {state}/ON[]>>>>")
+        return b.finish(marked("MC0", text(60, 400, HIDDEN)))
+
+    direct = trace_text(build(None), 0)
+    assert _words(direct)[HIDDEN]["layer_off"] is True
+    assert trace_text(build("/OFF"), 0) == direct
+    with pytest.raises(LayerReadError) as caught:
+        trace_text(build("(OFF)"), 0)
+    assert str(caught.value) == "/D /BaseState is not a name"
+
+
+def test_a_reference_to_an_array_that_is_not_one_still_fails_the_page():
+    b = Built()
+    g = b.group("Notes")
+    b.prop("MC0", g)
+    b.config(f"<</OCGs[{g} 0 R]/D<</OFF {_indirect(b, '7')}>>>>")
+    pdf = b.finish(marked("MC0", text(60, 400, HIDDEN)))
+    with pytest.raises(LayerReadError) as caught:
+        trace_text(pdf, 0)
+    assert str(caught.value) == "/D /OFF is not an array"
 
 
 def test_a_page_out_of_range_is_an_index_error_before_layers_are_read():
