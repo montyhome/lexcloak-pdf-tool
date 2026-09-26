@@ -55,7 +55,7 @@ import pymupdf as _pymupdf
 
 from .redact import Rect
 from .remove_text import _unpaired
-from .trace import _key, _restore_layers, _switch_layers_on
+from .trace import _every_layer_drawn, _key
 
 #: Glyph outline boxes, not ascender/descender boxes, for the ink test.
 _FLAGS = _pymupdf.TEXTFLAGS_RAWDICT | _pymupdf.TEXT_ACCURATE_BBOXES
@@ -74,11 +74,8 @@ def _trace_keys(doc, pno: int) -> tuple[Counter, dict]:
     Only keys: the word boxes ``remove_text`` builds cost a Rect per
     character, and the floor check reads each page twice.
     """
-    _, restore = _switch_layers_on(doc)
-    try:
-        spans = doc[pno].get_texttrace()
-    finally:
-        _restore_layers(doc, restore)
+    with _every_layer_drawn(doc, pno) as page:
+        spans = page.get_texttrace()
     keys: Counter = Counter()
     seen: Counter = Counter()
     plain = {}
