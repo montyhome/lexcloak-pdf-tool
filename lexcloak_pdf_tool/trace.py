@@ -61,7 +61,8 @@ switched off and is read directly.
 Two checks keep that comparison honest, and each fails the page (a
 ``LayerReadError``, which a caller reports as "could not check") rather than
 guess: the document's ``/OCProperties`` must have the shape the PDF
-specification gives it, and every character the page draws by default must
+specification gives it (one that lists no group may omit ``/OCGs`` and
+``/D``, and is still compared), and every character the page draws by default must
 also be in the copy, at the same place with the same properties. Neither
 check reads or reports any text.
 """
@@ -164,31 +165,63 @@ def _is_dict(doc, kind: str, value: str) -> bool:
         return False
 
 
+def _resolved(doc, kind: str, value: str) -> tuple[str, str]:
+    """``xref_get_key``'s ``(kind, value)`` with one indirect reference
+    followed: any value may be written as a reference to an object, and an
+    array or name so written is still an array or name. A reference to no
+    object reads as ``"dangling"``."""
+    if kind != "xref":
+        return kind, value
+    m = _REF.match(value)
+    if not m:
+        return kind, value
+    try:
+        obj = doc.xref_object(int(m.group(1)), compressed=True).strip()
+    except Exception:  # noqa: BLE001 -- a dangling reference
+        return "dangling", ""
+    if obj.startswith("<<"):
+        return "dict", obj
+    if obj.startswith("["):
+        return "array", obj
+    if obj.startswith("/"):
+        return "name", obj
+    return ("null" if obj == "null" else "other"), obj
+
+
 def _check_layers(doc) -> bool:
     """Whether the document has optional content; raise ``LayerReadError``
     when its ``/OCProperties`` does not have the specification's shape (a
     dictionary whose ``/OCGs`` is an array of group dictionaries and whose
-    ``/D`` is a dictionary, with arrays where arrays belong)."""
+    ``/D`` is a dictionary, with arrays where arrays belong; any of them may
+    be written as a reference to the object).
+
+    An ``/OCProperties`` that lists no group (``/OCGs`` empty or absent) has
+    nothing for a ``/D`` to configure, so it may lack one. Such a document is
+    still read as layered: whether the page draws everything is decided by
+    the comparison, as for any other layered page, never assumed here."""
     if not _has_layers(doc):
         return False
     try:
         cat = doc.pdf_catalog()
         if not _is_dict(doc, *doc.xref_get_key(cat, "OCProperties")):
             raise LayerReadError("/OCProperties is not a dictionary")
-        kind, value = doc.xref_get_key(cat, "OCProperties/OCGs")
-        if kind != "array":
+        kind, value = _resolved(doc, *doc.xref_get_key(cat, "OCProperties/OCGs"))
+        if kind not in ("null", "array"):
             raise LayerReadError("/OCProperties /OCGs is not an array")
-        for ref in value.strip()[1:-1].split(" R"):
+        groups = 0
+        for ref in (value.strip()[1:-1].split(" R") if kind == "array" else ()):
             ref = ref.strip()
             if ref and not _is_dict(doc, "xref", ref + " R"):
                 raise LayerReadError("an /OCGs entry is not a group dictionary")
-        if not _is_dict(doc, *doc.xref_get_key(cat, "OCProperties/D")):
+            groups += bool(ref)
+        kind, _ = _resolved(doc, *doc.xref_get_key(cat, "OCProperties/D"))
+        if kind != "dict" and not (kind == "null" and not groups):
             raise LayerReadError("/OCProperties lacks a default configuration /D")
         for key in _CONFIG_ARRAYS:
-            kind, _ = doc.xref_get_key(cat, f"OCProperties/D/{key}")
+            kind, _ = _resolved(doc, *doc.xref_get_key(cat, f"OCProperties/D/{key}"))
             if kind not in ("null", "array"):
                 raise LayerReadError(f"/D /{key} is not an array")
-        kind, _ = doc.xref_get_key(cat, "OCProperties/D/BaseState")
+        kind, _ = _resolved(doc, *doc.xref_get_key(cat, "OCProperties/D/BaseState"))
         if kind not in ("null", "name"):
             raise LayerReadError("/D /BaseState is not a name")
     except LayerReadError:
