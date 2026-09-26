@@ -534,9 +534,21 @@ def _save_encrypted(doc, password: str) -> tuple[bytes, bool]:
 
 def _page_boxes(page, pg_matches: list[dict], redact_label: str) -> list[tuple]:
     """``(rect, edge strips, label, font size)`` for each match on ``page``,
-    in the frame ``add_redact_annot`` takes, in payload order."""
+    in the frame ``add_redact_annot`` takes, in payload order.
+
+    A box identical to one already listed (same rect, label and font size,
+    so the same strips) is left out: burning it again removes nothing more
+    and draws the same fill in the same place. It is not free to send.
+    PyMuPDF's ``add_redact_annot`` rescans every annotation on the page to
+    name the new one, and ``apply_redactions`` rescans them to load each, so
+    a page's burn grows with the square of its box count (see
+    ``tests/test_repeated_boxes.py``). A payload that repeats each of a
+    page's boxes many times pays that square for nothing. A payload with no
+    repeated box burns exactly as before.
+    """
     page_rect = Rect(page.rect)  # as-rendered (rotation-applied) box
     boxes = []
+    seen = set()
     for m in pg_matches:
         r = m["rect"]
         rect = Rect(r["x0"], r["y0"], r["x1"], r["y1"])
@@ -573,6 +585,10 @@ def _page_boxes(page, pg_matches: list[dict], redact_label: str) -> list[tuple]:
         # a trap. A payload carrying no per-match labels therefore takes
         # byte-identical decisions to v0.6.3.
         label = m.get("redact_label") or redact_label
+        key = (tuple(rect), label, font_size)
+        if key in seen:
+            continue
+        seen.add(key)
         boxes.append((rect, strips, label, font_size))
     return boxes
 
