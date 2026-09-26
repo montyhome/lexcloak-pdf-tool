@@ -103,6 +103,23 @@ from lexcloak_pdf_tool.render import _render_page_doc
 from lexcloak_pdf_tool.sanitise import residue_report_pdf
 from lexcloak_pdf_tool.trace import _trace_text_doc, trace_text
 
+# The modules the ops load on first use are loaded here, at start, so a
+# running subprocess never reads its own code from disk again. A process
+# outlives the files it started from whenever the package is reinstalled
+# under it, and a module loaded late is then the new release calling into the
+# old one already in memory. v0.11.0 to v0.11.1 did exactly that: v0.11.1's
+# keep_lines imports a trace name v0.11.0 lacks, so every burn in a process
+# that started on v0.11.0 and burned after the swap raised ImportError.
+# ``redact`` cannot import ``keep_lines`` at its top (keep_lines imports
+# redact), which is why the late imports exist; here there is no cycle.
+# The ``import a.b`` form, not ``from a import b``: the package's own
+# ``from __future__ import annotations`` binds ``lexcloak_pdf_tool.annotations``
+# to the future flag, so the ``from`` form finds that and loads no module.
+# Guarded by tests/test_cli.py::test_starting_the_cli_loads_every_module.
+import lexcloak_pdf_tool.annotations  # noqa: E402,F401
+import lexcloak_pdf_tool.keep_lines  # noqa: E402,F401
+import lexcloak_pdf_tool.ocr  # noqa: E402,F401
+
 # MuPDF's C library writes error/warning lines directly to fd 1 (stdout),
 # bypassing Python's sys.stdout. In a length-prefixed JSON IPC protocol
 # that is fatal: the parent reads the leaked bytes as the next frame's
