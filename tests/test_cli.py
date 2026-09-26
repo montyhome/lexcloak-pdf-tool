@@ -281,6 +281,32 @@ def test_importing_the_package_writes_nothing_to_stdout():
     )
 
 
+def test_starting_the_cli_loads_every_module():
+    """Regression: a running subprocess never reads its own code from disk.
+
+    A subprocess outlives the files it started from whenever the package is
+    reinstalled under it (a development venv shared by parallel runs). A
+    module an op loads on first use is then the NEW release, calling into
+    the OLD modules already in memory. v0.11.0 to v0.11.1 did exactly that:
+    ``keep_lines``, loaded on a process's first burn, imported a ``trace``
+    name v0.11.0 lacks, and every burn in that process raised ImportError.
+
+    Structural, so it also covers modules added later: once ``__main__`` has
+    loaded, every module of the package is in ``sys.modules``.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import pkgutil, sys, lexcloak_pdf_tool, lexcloak_pdf_tool.__main__\n"
+         "names = {f'lexcloak_pdf_tool.{m.name}' for m in "
+         "pkgutil.iter_modules(lexcloak_pdf_tool.__path__)}\n"
+         "print(','.join(sorted(names - set(sys.modules))))"],
+        capture_output=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
+    late = proc.stdout.decode("utf-8", errors="replace").strip()
+    assert late == "", f"loaded on first use, not at start: {late}"
+
+
 def test_package_does_not_import_the_deprecated_fitz_alias():
     """Static guard: no module may reach PyMuPDF through ``fitz``.
 
