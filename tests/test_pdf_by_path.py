@@ -106,7 +106,8 @@ def test_a_stateless_pdf_result_goes_to_out_path(tmp_path, op):
     assert "pdf_b64" not in result
     assert result["pdf_path"] == str(out)
     assert result["pdf_size"] == out.stat().st_size
-    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    if os.name == "posix":                   # Windows keeps no mode bits;
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600   # its folder's ACL rules
     if op not in ("encrypt", "decrypt"):   # both draw fresh keys on each save
         assert (_canonical_pdf(_file_bytes(out))
                 == _canonical_pdf(base64.b64decode(inline["result"]["pdf_b64"])))

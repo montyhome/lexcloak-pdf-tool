@@ -388,8 +388,9 @@ def _pdf_result(cmd: dict, out_bytes: bytes) -> dict:
     written to the request's ``out_path`` and named by ``pdf_path``.
 
     ``out_path`` must be absolute, its folder must exist, and nothing may be
-    there yet: the file is created exclusively, readable by its owner only,
-    so a path the caller did not mean can never be overwritten or followed
+    there yet: the file is created exclusively, with mode 0600 (on Windows,
+    which keeps no mode bits, access follows the folder the caller chose), so
+    a path the caller did not mean can never be overwritten or followed
     through a link. The result also carries ``pdf_size``. As in
     :func:`_get_pdf_path`, no error message echoes the path.
     """

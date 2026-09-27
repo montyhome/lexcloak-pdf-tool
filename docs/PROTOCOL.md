@@ -58,7 +58,8 @@ redaction re-encodes the pixels it blanks.
   optional `out_path` (string, absolute). When it is given, the PDF is
   written there and the result carries `pdf_path` (= `out_path`) and
   `pdf_size` (bytes) in place of `pdf_b64`; every other result field is
-  unchanged. The file is created exclusively, readable by its owner only:
+  unchanged. The file is created exclusively, with mode 0600 (Windows keeps
+  no mode bits, so there the folder the caller chose governs access):
   an existing file or a link at `out_path` fails the op (`FileExistsError`)
   and is left alone, and a relative or non-string `out_path` is a
   `ValueError`. The caller owns the file and deletes it.
