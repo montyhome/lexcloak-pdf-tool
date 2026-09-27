@@ -1,9 +1,9 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.11.4 ships
-protocol version 9.** Every earlier version from 2 stays in the supported
-set ({2, 3, 4, 5, 6, 7, 8, 9}) so a current subprocess serves older clients
+parent via length-prefixed JSON frames over stdin/stdout. **v0.12.0 ships
+protocol version 10.** Every earlier version from 2 stays in the supported
+set ({2, 3, 4, 5, 6, 7, 8, 9, 10}) so a current subprocess serves older clients
 cleanly during rolling client upgrades. The table under **Versioning**
 records what each version added.
 
@@ -37,7 +37,34 @@ as a clean exit.
 
 - **Max payload size:** 256 MiB per frame. Larger payloads return an
   `OverflowError` response. Guards against malformed length prefixes that
-  would otherwise allocate gigabytes.
+  would otherwise allocate gigabytes. Since 0.12.0 this holds for responses
+  too: a response over the limit is answered with an `OverflowError` error
+  frame and the subprocess keeps serving (before, it exited having written
+  nothing). A PDF too large to frame travels as a file instead (below).
+
+## PDFs by path *(v10+)*
+
+Base64 makes a PDF a third larger, so a PDF of about 200 MB does not fit a
+frame. A burn can grow a scanned document several-fold, because image
+redaction re-encodes the pixels it blanks.
+
+- **Input.** Every op that takes `pdf_b64` also takes `pdf_path` (string,
+  absolute path to a readable file) instead. The file is read in full and
+  never written; `pdf_b64` wins when both are sent. `open_doc_path` keeps
+  its own memory-mapped open.
+- **Output.** Every op that returns a PDF (`apply_redactions`,
+  `strip_metadata`, `set_metadata`, `insert_cover_page`, `reduce_size`,
+  `extract_pages`, `decrypt`, `encrypt` and their `_h` variants) takes an
+  optional `out_path` (string, absolute). When it is given, the PDF is
+  written there and the result carries `pdf_path` (= `out_path`) and
+  `pdf_size` (bytes) in place of `pdf_b64`; every other result field is
+  unchanged. The file is created exclusively, readable by its owner only:
+  an existing file or a link at `out_path` fails the op (`FileExistsError`)
+  and is left alone, and a relative or non-string `out_path` is a
+  `ValueError`. The caller owns the file and deletes it.
+- **No path is echoed.** File errors keep their type (`FileNotFoundError`,
+  `FileExistsError`, `PermissionError`) and lose the file name: file names
+  routinely carry the very data being redacted.
 
 ## Request schema
 
@@ -887,3 +914,4 @@ shipping client has caught up.
 | 0.11.2 | 9 | No new ops, no wire-surface change. `trace_text` (+ `_h`) no longer refuses two shapes of `/OCProperties` the PDF specification allows or that switch nothing off. (1) An `/OCProperties` that lists no group (`/OCGs` empty or absent) may omit `/D`, and an absent `/OCGs` reads as an empty one: with no group listed there is nothing for a default configuration to switch off. 0.11.1 refused every page of such a document with `LayerReadError`, where 0.10.x read it. The page is still read through the comparison with every layer drawn, so a word the page leaves undrawn is still `layer_off`; a word marked by a group no array lists is drawn by MuPDF (and by PDFium), and is reported as drawn. (2) `/OCGs`, `/D` and the arrays and name inside `/D` may be written as references to objects, as any PDF value may; 0.11.1 refused a reference where it expected an array or a name. A malformed value (a `/D` that is present but not a dictionary, an `/OFF` that is not an array, a reference to no object) is still refused, whether or not a group is listed. `PROTOCOL_VERSION` stays 9. |
 | 0.11.3 | 9 | No new ops, no wire-surface change. The subprocess loads every module of the package when it starts: `annotations`, `keep_lines` and `ocr` were loaded on first use, by `list_annotations`, the first `apply_redactions` and the first OCR extract. A subprocess outlives the files it started from when the package is reinstalled under it, and a module loaded after that is the new release calling into the old one already in memory. From 0.11.0 to 0.11.1 that was an `ImportError` on every `apply_redactions` in a subprocess that started on 0.11.0 and burned for the first time after the reinstall. A running subprocess now keeps the release it started with. `PROTOCOL_VERSION` stays 9. |
 | 0.11.4 | 9 | No new ops, no wire-surface change. `apply_redactions` (+ `_h`) burns a box the payload repeats on a page once: a box identical to one already listed on its page (same rect, label and font size) is left out. Burning it again removed nothing more and drew the same fill in the same place, but it was not free: PyMuPDF's `add_redact_annot` rescans every annotation on the page to name the new one and `apply_redactions` rescans them to load each, so a page's burn grows with the square of its box count (pymupdf 1.28.2: about 5 s for 1,000 boxes on one page, 24 s for 2,000), and `keep_uncovered_lines` pays it once per pass. A payload that repeats its boxes now burns to the same bytes as one that sends each box once (trailer `/ID` aside); a payload with no repeated box burns exactly as before. A box repeated with another label, or on another page, is still burned. `PROTOCOL_VERSION` stays 9. |
+| 0.12.0 | **10** | PDFs by path. Every op that takes `pdf_b64` also takes `pdf_path` (read, never written), and every op that returns a PDF writes it to an optional `out_path` and answers `pdf_path` + `pdf_size` in place of `pdf_b64` (created exclusively, owner-only; no error names a path). A response over the 256 MiB frame limit, which a burned PDF of about 200 MB is once base64, is answered with an `OverflowError` error frame and the subprocess keeps serving; until 0.12.0 it escaped `main()` and the subprocess exited having written nothing, which a client can only read as a crash. See **PDFs by path**. |

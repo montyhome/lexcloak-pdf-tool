@@ -173,11 +173,16 @@ _pymupdf.set_messages(stream=sys.stderr)
 # v9 (0.10.0) adds render_removed/render_removed_h (a page rendered as
 # it would look with some text removed), per-character boxes and later covers
 # on trace_text, and chars on remove_text entries (part of a word).
+# v10 (0.12.0): a PDF over the frame limit can travel as a file. Every op
+# that takes ``pdf_b64`` also takes ``pdf_path``, and every op that returns
+# a PDF writes it to the request's ``out_path`` when one is given and names
+# it with ``pdf_path`` (see _decode_pdf / _pdf_result). A response over the
+# limit is answered with an error frame rather than an exit.
 # Older versions stay supported so a newer
 # subprocess can still serve older clients cleanly; once every shipping
 # client speaks v4+, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 9
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9}
+PROTOCOL_VERSION = 10
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -355,13 +360,60 @@ def _err(exc: BaseException) -> dict:
 
 
 def _decode_pdf(cmd: dict) -> bytes:
-    """Pull and base64-decode the ``pdf_b64`` field. Raise on missing/bad."""
+    """The op's input PDF: the base64 ``pdf_b64`` field, or (v10) the file
+    named by ``pdf_path``. Raise on missing/bad.
+
+    A PDF over the frame limit cannot travel inline: base64 makes it a third
+    larger, and a frame holds ``MAX_PAYLOAD_BYTES``. Since protocol 10 every
+    op that takes ``pdf_b64`` takes ``pdf_path`` instead, read here in full
+    (``open_doc_path`` keeps its own memory-mapped open). The file is the
+    caller's: it is only read.
+    """
+    if "pdf_b64" not in cmd and "pdf_path" in cmd:
+        try:
+            with open(_get_pdf_path(cmd), "rb") as fh:
+                return fh.read()
+        except OSError as exc:
+            raise _without_path(exc) from None
     if "pdf_b64" not in cmd:
         raise KeyError("op requires 'pdf_b64'")
     try:
         return base64.b64decode(cmd["pdf_b64"], validate=True)
     except (ValueError, TypeError) as exc:
         raise ValueError(f"pdf_b64 not valid base64: {exc}") from None
+
+
+def _pdf_result(cmd: dict, out_bytes: bytes) -> dict:
+    """The result field for an op's output PDF: inline ``pdf_b64``, or (v10)
+    written to the request's ``out_path`` and named by ``pdf_path``.
+
+    ``out_path`` must be absolute, its folder must exist, and nothing may be
+    there yet: the file is created exclusively, readable by its owner only,
+    so a path the caller did not mean can never be overwritten or followed
+    through a link. The result also carries ``pdf_size``. As in
+    :func:`_get_pdf_path`, no error message echoes the path.
+    """
+    out_path = cmd.get("out_path")
+    if out_path is None:
+        return {"pdf_b64": base64.b64encode(out_bytes).decode("ascii")}
+    if not isinstance(out_path, str) or not os.path.isabs(out_path):
+        raise ValueError("out_path must be an absolute path")
+    try:
+        fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_BINARY", 0), 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(out_bytes)
+    except OSError as exc:
+        raise _without_path(exc) from None
+    return {"pdf_path": out_path, "pdf_size": len(out_bytes)}
+
+
+def _without_path(exc: OSError) -> OSError:
+    """``exc`` again, of the same type, with the file name left out of its
+    message (see :func:`_get_pdf_path` on why a path must not travel)."""
+    if exc.errno is None:
+        return type(exc)(type(exc).__name__)
+    return type(exc)(exc.errno, os.strerror(exc.errno))
 
 
 def _get_pdf_path(cmd: dict) -> str:
@@ -491,7 +543,7 @@ def _op_search_for(cmd: dict) -> dict:
     }
 
 
-def _redaction_result(out_bytes: bytes, protection_applied: bool,
+def _redaction_result(cmd: dict, out_bytes: bytes, protection_applied: bool,
                       remove_text, removal: dict) -> dict:
     """Response for both apply_redactions ops.
 
@@ -500,7 +552,7 @@ def _redaction_result(out_bytes: bytes, protection_applied: bool,
     subprocess ignored the field".
     """
     result = {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        **_pdf_result(cmd, out_bytes),
         "protection_applied": bool(protection_applied),
     }
     if remove_text is not None:
@@ -540,13 +592,14 @@ def _op_apply_redactions(cmd: dict) -> dict:
         removal_sink=removal,
         keep_uncovered_lines=_keep_uncovered_lines(cmd),
     )
-    return _redaction_result(out_bytes, protection_applied, remove_text, removal)
+    return _redaction_result(cmd, out_bytes, protection_applied, remove_text,
+                             removal)
 
 
 def _op_strip_metadata(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     out_bytes = strip_metadata(pdf_bytes)
-    return {"pdf_b64": base64.b64encode(out_bytes).decode("ascii")}
+    return _pdf_result(cmd, out_bytes)
 
 
 def _op_set_metadata(cmd: dict) -> dict:
@@ -555,7 +608,7 @@ def _op_set_metadata(cmd: dict) -> dict:
     if fields is None:
         raise ValueError("op requires 'fields' dict")
     out_bytes = set_metadata(pdf_bytes, fields)
-    return {"pdf_b64": base64.b64encode(out_bytes).decode("ascii")}
+    return _pdf_result(cmd, out_bytes)
 
 
 def _op_insert_cover_page(cmd: dict) -> dict:
@@ -564,7 +617,7 @@ def _op_insert_cover_page(cmd: dict) -> dict:
     if context is None:
         raise ValueError("op requires 'context' dict")
     out_bytes = insert_cover_page(pdf_bytes, context)
-    return {"pdf_b64": base64.b64encode(out_bytes).decode("ascii")}
+    return _pdf_result(cmd, out_bytes)
 
 
 def _op_reduce_size(cmd: dict) -> dict:
@@ -582,7 +635,7 @@ def _op_reduce_size(cmd: dict) -> dict:
         preserve_metadata=preserve_metadata,
     )
     return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        **_pdf_result(cmd, out_bytes),
         "info": info,
     }
 
@@ -594,7 +647,7 @@ def _op_extract_pages(cmd: dict) -> dict:
     to_page = int(cmd.get("to_page", -1))
     out_bytes = extract_pages(pdf_bytes, from_page, to_page)
     return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        **_pdf_result(cmd, out_bytes),
         "page_count": to_page - from_page + 1,
     }
 
@@ -692,7 +745,7 @@ def _op_decrypt(cmd: dict) -> dict:
         )
     out_bytes, page_count_value = decrypt_pdf(pdf_bytes, password)
     return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        **_pdf_result(cmd, out_bytes),
         "page_count": page_count_value,
     }
 
@@ -705,7 +758,7 @@ def _op_encrypt(cmd: dict) -> dict:
     # bytes unchanged with protection_applied=False.
     out_bytes, protection_applied = encrypt(pdf_bytes, password)
     return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        **_pdf_result(cmd, out_bytes),
         "protection_applied": bool(protection_applied),
     }
 
@@ -902,7 +955,8 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
         removal_sink=removal,
         keep_uncovered_lines=_keep_uncovered_lines(cmd),
     )
-    return _redaction_result(out_bytes, protection_applied, remove_text, removal)
+    return _redaction_result(cmd, out_bytes, protection_applied, remove_text,
+                             removal)
 
 
 def _op_strip_metadata_h(cmd: dict) -> dict:
@@ -917,7 +971,7 @@ def _op_strip_metadata_h(cmd: dict) -> dict:
     _strip_metadata_doc(doc)
     buf = io.BytesIO()
     doc.save(buf, garbage=4, deflate=True, clean=True)
-    return {"pdf_b64": base64.b64encode(buf.getvalue()).decode("ascii")}
+    return _pdf_result(cmd, buf.getvalue())
 
 
 def _op_set_metadata_h(cmd: dict) -> dict:
@@ -935,7 +989,7 @@ def _op_set_metadata_h(cmd: dict) -> dict:
     _set_metadata_doc(doc, fields)
     buf = io.BytesIO()
     doc.save(buf, garbage=4, deflate=True, clean=True)
-    return {"pdf_b64": base64.b64encode(buf.getvalue()).decode("ascii")}
+    return _pdf_result(cmd, buf.getvalue())
 
 
 def _op_insert_cover_page_h(cmd: dict) -> dict:
@@ -954,7 +1008,7 @@ def _op_insert_cover_page_h(cmd: dict) -> dict:
     _insert_cover_page_doc(doc, context)
     buf = io.BytesIO()
     doc.save(buf, garbage=4, deflate=True, clean=True)
-    return {"pdf_b64": base64.b64encode(buf.getvalue()).decode("ascii")}
+    return _pdf_result(cmd, buf.getvalue())
 
 
 def _save_doc_bytes(doc) -> bytes:
@@ -991,7 +1045,7 @@ def _op_reduce_size_h(cmd: dict) -> dict:
     else:
         out_bytes = new_bytes
     return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        **_pdf_result(cmd, out_bytes),
         "info": {
             "orig_size": len(orig_bytes),
             "new_size": len(out_bytes),
@@ -1026,7 +1080,7 @@ def _op_encrypt_h(cmd: dict) -> dict:
     else:
         out_bytes, protection_applied = _save_encrypted(doc, password)
     return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        **_pdf_result(cmd, out_bytes),
         "protection_applied": bool(protection_applied),
     }
 
@@ -1043,7 +1097,7 @@ def _op_extract_pages_h(cmd: dict) -> dict:
     to_page = int(cmd.get("to_page", -1))
     out_bytes = extract_pages_from_doc(doc, from_page, to_page)
     return {
-        "pdf_b64": base64.b64encode(out_bytes).decode("ascii"),
+        **_pdf_result(cmd, out_bytes),
         "page_count": to_page - from_page + 1,
     }
 
@@ -1227,6 +1281,19 @@ def main() -> int:
         _stderr(f"{op} ok={ok} duration_ms={duration_ms}")
         try:
             _write_frame(stdout, response)
+        except OverflowError as exc:
+            # The response is over the frame limit (a burned PDF of about
+            # 200 MB is, once base64). Until v0.12.0 this escaped main() and
+            # the process exited with nothing written, which a client can
+            # only read as a crash. Answer with an error frame and keep
+            # serving: nothing was written, so the channel is intact. A
+            # client that names an ``out_path`` gets the PDF as a file.
+            _stderr(f"{op} response over the frame limit")
+            try:
+                _write_frame(stdout, _err(exc))
+            except OSError as exc2:
+                _stderr(f"lexcloak_pdf_tool stdout closed: {exc2}")
+                return 0
         except OSError as exc:
             _stderr(f"lexcloak_pdf_tool stdout closed: {exc}")
             return 0
