@@ -1,9 +1,9 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.12.0 ships
-protocol version 10.** Every earlier version from 2 stays in the supported
-set ({2, 3, 4, 5, 6, 7, 8, 9, 10}) so a current subprocess serves older clients
+parent via length-prefixed JSON frames over stdin/stdout. **v0.14.0 ships
+protocol version 12.** Every earlier version from 2 stays in the supported
+set ({2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) so a current subprocess serves older clients
 cleanly during rolling client upgrades. The table under **Versioning**
 records what each version added.
 
@@ -83,6 +83,8 @@ redaction re-encodes the pixels it blanks.
        | "trace_text" | "trace_text_h"
        | "residue_report"
        | "list_side_text" | "list_side_text_h"
+       | "list_unseen_images" | "list_unseen_images_h"
+       | "list_tag_text" | "list_tag_text_h"
        | "render_removed" | "render_removed_h"
        | "render_h" | "extract_native_h" | "extract_ocr_h"
        | "extract_text_dict_h" | "extract_text_plain_h"
@@ -301,6 +303,64 @@ Ids are only meaningful for the bytes they were listed from. The name tree is
 walked object by object; the op never calls MuPDF's whole-tree name
 resolution.
 
+### `list_unseen_images`  *(v12+)*
+
+Image placements the page, as the document opens, never shows. Read-only.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required (unencrypted) |
+
+**Result:**
+```json
+{"unseen": [{"page": int, "state": "outside-crop" | "off-layer",
+             "bbox": [x0, y0, x1, y1], "xref": int, "pixels": int,
+             "xref_shown": bool}, ...],
+ "counts": {"shown": int, "partly-outside": int,
+            "outside-crop": int, "off-layer": int},
+ "unreadable_pages": [int, ...]}
+```
+
+`outside-crop` is drawn wholly outside the crop box; `off-layer` is drawn only
+in optional content the document switches off. Placements are read from
+MuPDF's draw log as the document opens and from a second copy of the same
+bytes with `/OCProperties` removed (which draws every group), so object
+numbers are the source's. `bbox` is in the unrotated page space, origin at the
+crop box's top-left corner: the space `remove_images` takes. `xref` is the
+image object drawn, 0 for an inline image; `pixels` is its width times
+height (0 for inline); `xref_shown` says whether any placement of the same
+object, anywhere in the document, is shown. `counts` covers every placement;
+`partly-outside` is shown, with part of its box outside the crop box. A page
+that cannot be read is listed in `unreadable_pages` and never reads as having
+nothing unseen; a document whose optional content cannot be read lists every
+page there.
+
+### `list_tag_text`  *(v12+)*
+
+Where text extraction returns letters or digits that differ from the glyphs a
+page draws: in marked content tagged `/ActualText`, extraction returns the
+tag's text in place of the glyphs. Read-only.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required (unencrypted) |
+
+**Result:**
+```json
+{"entries": [{"page": int, "text": str, "drawn": str,
+              "bbox": [x0, y0, x1, y1] | null}, ...],
+ "unreadable_pages": [int, ...]}
+```
+
+`text` is what extraction returns there and `drawn` the glyphs drawn under it.
+`bbox` is in the rotated page frame, as `trace_text` reports boxes. A tag
+that wraps no glyphs (around a drawing, an image, or nothing) is skipped by
+MuPDF's extraction but not necessarily by other readers: such a tag is read
+from the page's content streams, the form XObjects they draw and their
+marked-content property lists, and listed with `drawn` `""` and `bbox` `null`
+when extraction never returns its letters and digits. A tag that only drops
+a hyphen or a space is not listed. Nothing here judges what a tag means.
+
 ### `trace_text`  *(v7+)*
 
 Every word the page's content carries, with how it is drawn. The opposite
@@ -471,8 +531,11 @@ PyMuPDF's `page.get_text()` plain-text output.
 |---|---|---|
 | `pdf_b64` | base64 string | required |
 | `page` | int | `0` |
+| `drawn_only` *(v12+)* | bool | `false` |
 
-**Result:** `{"text": str}`.
+**Result:** `{"text": str}`. With `drawn_only`, the text is the glyphs the
+page draws: `/ActualText` is not substituted for them. A non-boolean value is
+an error.
 
 ### `search_for`
 
@@ -509,6 +572,9 @@ Black-box redactions, optional metadata strip, optional re-encryption.
 | `remove_text` *(v7+)* | list of word dicts \| null | null |
 | `keep_uncovered_lines` *(0.11.0+)* | bool | `false` |
 | `side_text` *(v11+)* | list of edit dicts \| null | null |
+| `blank_images` *(v12+)* | list of object numbers \| null | null |
+| `remove_images` *(v12+)* | list of `{"page", "box"}` \| null | null |
+| `strip_tags_pages` *(v12+)* | list of page indices \| null | null |
 
 Match-dict shape:
 ```json
@@ -603,6 +669,19 @@ name no longer resolves. A rename that would leave two destinations with one
 name is skipped as a whole. An edit whose id does not resolve, or whose kind
 cannot take that action, is skipped and changes nothing. A malformed edit
 returns `error_type: "ValueError"` before anything is changed.
+
+`blank_images` (v12+) replaces each named image object, by the numbers
+`list_unseen_images` reported for the **same bytes**, with a one-pixel stencil
+mask that paints nothing; every placement of it then draws nothing, so name
+only an object no placement shows. `remove_images` (v12+) removes the image
+draws inside each `box` (in `list_unseen_images`'s space), with text and
+drawings untouched; a box that reaches the crop box, or that another image
+draw reaches into, is skipped, because the removal takes every image it
+touches. Both run first, with `side_text`. The response carries, **only when
+the request carried either**, `"unseen_images": {"blanked": int, "removed":
+int, "skipped_blank": [xref, ...], "skipped_remove": [{"page", "box"}, ...]}`.
+`strip_tags_pages` (v12+) removes `/ActualText` and `/Alt` from the named
+pages exactly as from a page the burn touched.
 
 **Result:** `{"pdf_b64": str, "protection_applied": bool}`, plus, **exactly
 when the request carried `side_text`**, `"side_text": {"applied": int,
@@ -861,6 +940,8 @@ The following ops accept `handle` (string, required) instead of `pdf_b64`:
 | `trace_text` | `trace_text_h` | `{"rect": [...], "rotation": int, "image_cover": float, "words": [...]}` |
 | `residue_report` | — | `{"report": {...}}` |
 | `list_side_text` | `list_side_text_h` | `{"entries": [...], "unreadable": int}` |
+| `list_unseen_images` | `list_unseen_images_h` | `{"unseen": [...], "counts": {...}, "unreadable_pages": [...]}` |
+| `list_tag_text` | `list_tag_text_h` | `{"entries": [...], "unreadable_pages": [...]}` |
 | `render_removed` | `render_removed_h` | `{"png_b64": str, "lost": [...], "kept": [...], "missed": [...]}` |
 | `search_for` | `search_for_h` | `{"rects": [...]}` |
 | `apply_redactions` | `apply_redactions_h` | `{"pdf_b64": str, "protection_applied": bool}` |
@@ -965,3 +1046,4 @@ shipping client has caught up.
 | 0.11.4 | 9 | No new ops, no wire-surface change. `apply_redactions` (+ `_h`) burns a box the payload repeats on a page once: a box identical to one already listed on its page (same rect, label and font size) is left out. Burning it again removed nothing more and drew the same fill in the same place, but it was not free: PyMuPDF's `add_redact_annot` rescans every annotation on the page to name the new one and `apply_redactions` rescans them to load each, so a page's burn grows with the square of its box count (pymupdf 1.28.2: about 5 s for 1,000 boxes on one page, 24 s for 2,000), and `keep_uncovered_lines` pays it once per pass. A payload that repeats its boxes now burns to the same bytes as one that sends each box once (trailer `/ID` aside); a payload with no repeated box burns exactly as before. A box repeated with another label, or on another page, is still burned. `PROTOCOL_VERSION` stays 9. |
 | 0.12.0 | **10** | PDFs by path. Every op that takes `pdf_b64` also takes `pdf_path` (read, never written), and every op that returns a PDF writes it to an optional `out_path` and answers `pdf_path` + `pdf_size` in place of `pdf_b64` (created exclusively, owner-only; no error names a path). A response over the 256 MiB frame limit, which a burned PDF of about 200 MB is once base64, is answered with an `OverflowError` error frame and the subprocess keeps serving; until 0.12.0 it escaped `main()` and the subprocess exited having written nothing, which a client can only read as a crash. See **PDFs by path**. |
 | 0.13.0 | **11** | Adds `list_side_text` (+ `list_side_text_h`): the strings a document carries outside its page content (bookmark titles, named destinations, page-label prefixes, optional-content group names, URI link addresses, and `/Alt` and `/ActualText` on structure elements), each with an id, a page and its text, and a count of structures that could not be read. `apply_redactions` (+ `_h`) gains the optional `side_text` field, which rewrites named strings before the burn and answers `"side_text": {"applied", "skipped"}`. Without the field every burn is unchanged. The supported set widens to {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}. |
+| 0.14.0 | **12** | Adds `list_unseen_images` (+ `_h`): image placements the page as it opens never shows, drawn wholly outside the crop box or only in switched-off optional content, each with the object it draws and whether that object is shown anywhere else; and `list_tag_text` (+ `_h`): where text extraction returns letters or digits that differ from the glyphs drawn, `/ActualText` in page content, forms and property lists, including tags that wrap no glyphs. `apply_redactions` (+ `_h`) gains `blank_images`, `remove_images` and `strip_tags_pages`, answering `"unseen_images"` when either image field was sent; `extract_text_plain` (+ `_h`) gains `drawn_only`. Without the fields every burn and read is unchanged. The supported set widens to {2, ..., 12}. |

@@ -8,6 +8,12 @@ import pymupdf as _pymupdf
 
 from .sanitise import drop_javascript_names, sanitise_document, strip_extra_metadata
 from .side_text import rewrite_side_text, validate_side_text_edits
+from .unseen import (
+    blank_images as _blank_images,
+    remove_images as _remove_images,
+    validate_blank_images,
+    validate_remove_images,
+)
 
 PDF_ENCRYPT_AES_256 = _pymupdf.PDF_ENCRYPT_AES_256
 PDF_PERM_ACCESSIBILITY = _pymupdf.PDF_PERM_ACCESSIBILITY
@@ -614,6 +620,13 @@ def _add_burn_annots(page, boxes: list[tuple]) -> None:
             page.add_redact_annot(rect, fill=(0, 0, 0))
 
 
+def _validate_pages(pages, name: str) -> set[int]:
+    if not isinstance(pages, list) or any(
+            isinstance(p, bool) or not isinstance(p, int) or p < 0 for p in pages):
+        raise ValueError(f"{name} must be a list of page indices")
+    return set(pages)
+
+
 def _apply_redactions_doc(doc, matches: list[dict],
                           redact_label: str = "",
                           active_categories: list[str] | set[str] | None = None,
@@ -626,6 +639,10 @@ def _apply_redactions_doc(doc, matches: list[dict],
                           keep_uncovered_lines: bool = False,
                           side_text: list | None = None,
                           side_text_sink: dict | None = None,
+                          blank_images: list | None = None,
+                          remove_images: list | None = None,
+                          strip_tags_pages: list | None = None,
+                          unseen_sink: dict | None = None,
                           ) -> tuple[bytes, bool]:
     """Apply redactions to an open ``pymupdf.Document`` and return (bytes, protected).
 
@@ -664,6 +681,16 @@ def _apply_redactions_doc(doc, matches: list[dict],
     ascender-to-descender box. The fill, images and graphics still use the
     box unchanged, and the old text removal stays the floor. Default False:
     the historical burn, byte for byte. See ``keep_lines.py``.
+
+    ``blank_images`` (v0.14.0) names image objects, by the numbers
+    ``list_unseen_images`` reported for these same bytes, to replace with a
+    stencil that paints nothing; ``remove_images`` names ``{"page", "box"}``
+    areas wholly outside the crop box whose image draws are removed. Both are
+    applied first, with ``side_text``. ``strip_tags_pages`` names pages whose
+    ``/ActualText`` and ``/Alt`` are removed exactly as on a page the burn
+    touched. ``unseen_sink`` receives ``{"blanked": n, "removed": n,
+    "skipped_blank": [xref, ...], "skipped_remove": [{"page", "box"}, ...]}``.
+    ``None`` changes nothing.
     """
     from .keep_lines import burn_keeping_lines
     from .remove_text import remove_text_doc, validate_remove_text
@@ -683,6 +710,22 @@ def _apply_redactions_doc(doc, matches: list[dict],
         outcome = rewrite_side_text(doc, side_edits)
         if side_text_sink is not None:
             side_text_sink.update(outcome)
+    # v0.14.0: blank the images the caller named, for the same reason and at
+    # the same point as the rewrite above: the numbers are the listing's.
+    tag_pages = (_validate_pages(strip_tags_pages, "strip_tags_pages")
+                 if strip_tags_pages is not None else set())
+    blank_plan = (validate_blank_images(blank_images)
+                  if blank_images is not None else None)
+    remove_plan = (validate_remove_images(remove_images)
+                   if remove_images is not None else None)
+    if blank_plan is not None or remove_plan is not None:
+        blanked = _blank_images(doc, blank_plan or [])
+        removed = _remove_images(doc, remove_plan or [])
+        if unseen_sink is not None:
+            unseen_sink.update({"blanked": blanked["blanked"],
+                                "removed": removed["removed"],
+                                "skipped_blank": blanked["skipped"],
+                                "skipped_remove": removed["skipped"]})
     # Flatten form fields BEFORE redacting: a widget /V survives a redaction
     # box otherwise (see _flatten_form_fields). No-op for non-form PDFs.
     _flatten_form_fields(doc)
@@ -759,6 +802,8 @@ def _apply_redactions_doc(doc, matches: list[dict],
     touched = set(by_page) | {p for p in blackout_set if 0 <= p < len(doc)}
     if removal_plan is not None:
         touched |= set(removal_plan)
+    # v0.14.0: pages whose tags the caller wants gone without a burn.
+    touched |= tag_pages
     touched -= removed_set
     removed_sorted = sorted(p for p in removed_set if 0 <= p < len(doc))
     touched = {p - sum(1 for r in removed_sorted if r < p)
@@ -820,6 +865,10 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
                      keep_uncovered_lines: bool = False,
                      side_text: list | None = None,
                      side_text_sink: dict | None = None,
+                     blank_images: list | None = None,
+                     remove_images: list | None = None,
+                     strip_tags_pages: list | None = None,
+                     unseen_sink: dict | None = None,
                      ) -> tuple[bytes, bool]:
     """Black-box redact enabled matches, return (new PDF bytes, protection_applied).
 
@@ -897,6 +946,10 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
             keep_uncovered_lines=keep_uncovered_lines,
             side_text=side_text,
             side_text_sink=side_text_sink,
+            blank_images=blank_images,
+            remove_images=remove_images,
+            strip_tags_pages=strip_tags_pages,
+            unseen_sink=unseen_sink,
         )
     finally:
         doc.close()

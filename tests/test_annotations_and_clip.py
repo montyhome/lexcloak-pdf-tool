@@ -304,6 +304,6 @@ class TestOpDispatch:
                                  "clip": clip})
 
     def test_protocol_version_advertises_11_and_still_supports_older(self):
-        assert PROTOCOL_VERSION == 11
+        assert PROTOCOL_VERSION >= 11
         assert {2, 3, 4, 5, 6, 7, 8, 9, 10}.issubset(SUPPORTED_PROTOCOL_VERSIONS)
         assert 11 in SUPPORTED_PROTOCOL_VERSIONS
