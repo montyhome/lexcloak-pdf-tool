@@ -400,3 +400,79 @@ def test_the_ops_that_save_keep_the_stamp():
     for name, out in outs.items():
         assert out != src, name                        # really re-saved
         assert _ink(pymupdf.open(stream=out)[0]) == before, name
+
+
+# ── The narrower rules (each pinned by a mutation check) ───────────────────
+
+
+def test_a_page_mupdf_did_not_rewrite_is_not_wrapped(monkeypatch):
+    """Only form instances the rewrite produced were filtered from the
+    default state; a page still showing an original form is left alone."""
+    doc = _page(LAYER + b"q /Fm0 Do Q", STAMP_FORM)
+    before = doc[0].read_contents()
+    monkeypatch.setattr(pymupdf.Page, "apply_redactions", lambda self, **kw: None)
+    assert apply_page_redactions(doc[0], **REMOVE_ONLY) is False
+    assert doc[0].read_contents() == before
+
+
+def test_a_form_shown_inside_bt_is_never_wrapped():
+    """``q`` is not allowed inside ``BT``: such a stream is left alone."""
+    doc = _page(LAYER + b"q /Fm0 Do Q", STAMP_FORM)
+    form = form_state._page_xobjects(doc[0])["Fm0"]
+    names = {"Fm0": form}
+    assert form_state._wrap(doc, b"BT /Fm0 Do ET", names, lambda x: True) is None
+    assert form_state._wrap(doc, b"q /Fm0 Do Q", names, lambda x: True) == (
+        b"q " + form_state.PREFIX + b"/Fm0 Do Q Q")
+    assert form_state._wrap(doc, b"q /Fm0 Do Q", names, lambda x: False) is None
+
+
+def test_the_reader_restores_state_at_Q():
+    """``3 Tr`` set inside ``q ... Q`` is gone at the Do: the form that
+    inherits the default is safe, and the page is restored."""
+    content = (b"BT 0 Tr /F1 10 Tf 20 60 Td (shown) Tj ET "
+               b"q BT 3 Tr /F1 10 Tf 20 100 Td (" + HIDDEN.encode() + b") Tj ET Q "
+               b"q /Fm0 Do Q")
+    doc = _page(content, STAMP_FORM_NO_TR)
+    reading = form_state._read_page(doc, doc[0])
+    assert (reading.safe, reading.at_risk) == (True, True)
+    unsafe = _page(content.replace(b" Q q /Fm0", b" q /Fm0"), STAMP_FORM_NO_TR)
+    assert form_state._read_page(unsafe, unsafe[0]).safe is False
+
+
+def test_a_form_an_unsafe_page_also_shows_keeps_mupdfs_content():
+    """Page 1 can be restored; page 2 also shows a form that relies on
+    inherited 3 Tr, so it cannot. The form both pages show keeps the content
+    MuPDF wrote; page 1's own Do is still wrapped."""
+    nested = b"BT 0 Tr /F1 10 Tf 200 150 Td (NESTED-0002) Tj ET"
+    outer = b"BT 0 Tr /F1 10 Tf 200 180 Td (OUTER-0003) Tj ET q /Fm9 Do Q"
+
+    def build():
+        doc = _page(LAYER + b"q /Fm0 Do Q", outer, nested=nested)
+        relying = doc.get_new_xref()
+        font = doc.xref_get_key(doc[0].xref, "Resources/Font/F1")[1]
+        doc.update_object(relying, f"<</Type/XObject/Subtype/Form/BBox[0 0 {W} {H}]"
+                                   f"/Resources<</Font<</F1 {font}>>>>>>")
+        doc.update_stream(relying, b"BT /F1 10 Tf 20 20 Td (relies) Tj ET")
+        res = doc.xref_get_key(doc[0].xref, "Resources")[1]
+        page2 = doc.new_page(width=W, height=H)
+        doc.xref_set_key(page2.xref, "Resources",
+                         res.replace("/XObject<<", f"/XObject<</FmR {relying} 0 R"))
+        cx = doc.get_new_xref()
+        doc.update_object(cx, "<<>>")
+        doc.update_stream(cx, LAYER + b"q /FmR Do Q q /Fm0 Do Q")
+        doc.xref_set_key(page2.xref, "Contents", f"{cx} 0 R")
+        return doc
+
+    import io
+    buf = io.BytesIO()
+    build().save(buf, **SAVE)
+    plain = pymupdf.open(stream=buf.getvalue())
+    ours = pymupdf.open(stream=save_document(build(), **SAVE))
+
+    def outer_form(d):
+        return next(d.xref_stream(x) for x in range(1, d.xref_length())
+                    if d.xref_is_stream(x) and b"OUTER" in (d.xref_stream(x) or b""))
+
+    assert outer_form(ours) == outer_form(plain)
+    assert form_state.PREFIX in ours[0].read_contents()
+    assert form_state.PREFIX not in ours[1].read_contents()
