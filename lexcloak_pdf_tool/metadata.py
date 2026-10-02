@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 
+from .form_state import save_document
 from .redact import open_pdf
 
 
@@ -162,7 +163,7 @@ def set_metadata(pdf_bytes: bytes, fields: dict) -> bytes:
     try:
         _set_metadata_doc(doc, fields)
         buf = io.BytesIO()
-        doc.save(buf, garbage=4, deflate=True, clean=True)
+        buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
     finally:
         doc.close()
     return buf.getvalue()

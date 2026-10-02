@@ -42,6 +42,7 @@ from __future__ import annotations
 import io
 import logging
 
+from .form_state import save_document
 from .redact import null_page_thumbnails, open_pdf, scrub_objects
 from .sanitise import sanitise_document, strip_extra_metadata
 
@@ -266,7 +267,7 @@ def reduce_size(
             preserve_metadata=preserve_metadata,
         )
         buf = io.BytesIO()
-        doc.save(buf, garbage=4, deflate=True, clean=True)
+        buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
         candidate = buf.getvalue()
     finally:
         doc.close()

@@ -406,3 +406,90 @@ def test_handle_op_matches_the_stateless_op():
     assert via["ok"] is True
     assert via["result"]["text_removal"] == {"removed": [[0, 0], [0, 1]], "kept": []}
     _assert_gone(base64.b64decode(via["result"]["pdf_b64"]))
+
+
+# ── v0.14.1: a page whose stamp is drawn in a form after an invisible layer ─
+
+
+def _layer_and_stamp(extra: bytes = b"", hidden: bytes = b"Qwzv 700-11-2233") -> bytes:
+    """A searchable-scan shape: invisible text (3 Tr), then a visible stamp
+    drawn in a form XObject that resets 0 Tr itself. MuPDF's rewrite used to
+    drop that reset, so any removal on the page hid the stamp, and every
+    word on the page was kept rather than harm it."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    font = doc.get_new_xref()
+    doc.update_object(font, "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>")
+    form = doc.get_new_xref()
+    doc.update_object(form, "<</Type/XObject/Subtype/Form/BBox[0 0 612 792]"
+                            f"/Resources<</Font<</F1 {font} 0 R>>>>>>")
+    doc.update_stream(form, b"BT 0 Tr /F1 9 Tf 480 770 Td (STAMP-000123) Tj ET")
+    doc.xref_set_key(page.xref, "Resources",
+                     f"<</Font<</F1 {font} 0 R>>/XObject<</Fm0 {form} 0 R>>>>")
+    content = doc.get_new_xref()
+    doc.update_object(content, "<<>>")
+    doc.update_stream(content, b"BT /F1 12 Tf 3 Tr 72 492 Td (" + hidden + b") Tj ET "
+                      + extra + b"q /Fm0 Do Q")
+    doc.xref_set_key(page.xref, "Contents", f"{content} 0 R")
+    return _bytes(doc)
+
+
+def test_hidden_words_on_a_page_with_a_stamp_form_are_removed():
+    pdf = _layer_and_stamp()
+    boxes = _word_boxes(pdf, {"Qwzv", "700-11-2233"})
+    assert [b["mode"] for b in boxes] == [3, 3]
+    out, sink = _remove(pdf, boxes)
+    assert sink == {"removed": [[0, 0], [0, 1]], "kept": []}
+    _assert_gone(out)
+    assert _gray(out) == _gray(pdf)             # the stamp still draws
+    assert "STAMP-000123" in _traced_text(out)
+
+
+def test_a_one_character_hidden_word_beside_the_stamp_form_is_removed():
+    pdf = _layer_and_stamp(hidden=b"Q")
+    out, sink = _remove(pdf, _word_boxes(pdf, {"Q"}))
+    assert sink == {"removed": [[0, 0]], "kept": []}
+    assert _gray(out) == _gray(pdf)
+    assert not _stream_holds(out, "(Q)")
+
+
+def test_a_hidden_word_on_visible_ink_is_still_kept_beside_the_stamp_form():
+    """The repair restores the stamp; it does not loosen the verify. A word
+    drawn on top of visible text of the same glyphs is still kept."""
+    pdf = _layer_and_stamp(extra=b"BT 0 Tr /F1 12 Tf 72 492 Td (Qwzv) Tj ET ")
+    boxes = [b for b in _word_boxes(pdf, {"Qwzv"}) if b["mode"] == 3]
+    out, sink = _remove(pdf, boxes)
+    assert sink == {"removed": [], "kept": [[0, 0]]}
+    assert _gray(out) == _gray(pdf)
+    assert _traced_text(out).count("Qwzv") == 2
+
+
+def test_a_stamp_form_that_relies_on_inherited_invisibility_is_untouched():
+    """A form that sets no render mode draws with the caller's 3 Tr: it is
+    invisible by construction and must stay so after a removal."""
+    doc = pymupdf.open(stream=_layer_and_stamp())
+    form = next(x for x in range(1, doc.xref_length())
+                if doc.xref_get_key(x, "Subtype")[1] == "/Form")
+    doc.update_stream(form, b"BT /F1 9 Tf 480 770 Td (STAMP-000123) Tj ET")
+    pdf = doc.tobytes()
+
+    def stamp_modes(data: bytes) -> list[int]:
+        return [s["type"] for s in pymupdf.open(stream=data)[0].get_texttrace()
+                if "STAMP" in "".join(chr(c[0]) for c in s["chars"])]
+
+    assert stamp_modes(pdf) == [3]
+    out, sink = _remove(pdf, _word_boxes(pdf, {"Qwzv"}))
+    assert sink == {"removed": [[0, 0]], "kept": []}
+    assert stamp_modes(out) == [3]
+    assert _gray(out) == _gray(pdf)
+
+
+@pytest.mark.parametrize("build", [
+    lambda: _layer_and_stamp(),
+    lambda: _hidden(render_mode=3),
+    lambda: _hidden(color=(1, 1, 1)),
+])
+def test_the_key_only_read_counts_exactly_what_the_word_read_counts(build):
+    from lexcloak_pdf_tool.remove_text import _key_counts, _keys_with_layers_on
+    doc = pymupdf.open(stream=build())
+    assert _key_counts(doc, 0) == _keys_with_layers_on(doc, 0)[1]

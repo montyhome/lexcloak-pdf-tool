@@ -59,6 +59,8 @@ from difflib import SequenceMatcher
 
 import pymupdf as _pymupdf
 
+from .form_state import apply_page_redactions
+
 logger = logging.getLogger(__name__)
 
 #: A placement box this far (points) outside the crop box still counts as on it.
@@ -385,7 +387,7 @@ def remove_images(doc, boxes: list[tuple[int, tuple]]) -> dict:
             for box in todo:
                 page.add_redact_annot(_pymupdf.Rect(box), fill=False)
             if todo:
-                page.apply_redactions(images=_pymupdf.PDF_REDACT_IMAGE_REMOVE,
+                apply_page_redactions(page, images=_pymupdf.PDF_REDACT_IMAGE_REMOVE,
                                       graphics=_pymupdf.PDF_REDACT_LINE_ART_NONE,
                                       text=_pymupdf.PDF_REDACT_TEXT_NONE)
                 removed += len(todo)
