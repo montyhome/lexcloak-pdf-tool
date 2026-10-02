@@ -101,6 +101,7 @@ from lexcloak_pdf_tool.reduce_size import _apply_reductions, _validate_reduce_pa
 from lexcloak_pdf_tool.remove_text import render_removed_doc, validate_remove_text
 from lexcloak_pdf_tool.render import _render_page_doc
 from lexcloak_pdf_tool.sanitise import residue_report_pdf
+from lexcloak_pdf_tool.side_text import list_side_text, list_side_text_pdf
 from lexcloak_pdf_tool.trace import _trace_text_doc, trace_text
 
 # The modules the ops load on first use are loaded here, at start, so a
@@ -178,11 +179,15 @@ _pymupdf.set_messages(stream=sys.stderr)
 # a PDF writes it to the request's ``out_path`` when one is given and names
 # it with ``pdf_path`` (see _decode_pdf / _pdf_result). A response over the
 # limit is answered with an error frame rather than an exit.
+# v11 (0.13.0) adds ``list_side_text``/``list_side_text_h`` (strings a PDF
+# carries outside its page content, with stable ids) and the optional
+# ``side_text`` field on both apply_redactions ops, which rewrites the named
+# strings before the burn.
 # Older versions stay supported so a newer
 # subprocess can still serve older clients cleanly; once every shipping
 # client speaks v4+, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 10
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10}
+PROTOCOL_VERSION = 11
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -545,7 +550,8 @@ def _op_search_for(cmd: dict) -> dict:
 
 
 def _redaction_result(cmd: dict, out_bytes: bytes, protection_applied: bool,
-                      remove_text, removal: dict) -> dict:
+                      remove_text, removal: dict,
+                      side_outcome: dict | None = None) -> dict:
     """Response for both apply_redactions ops.
 
     ``text_removal`` is present exactly when the request carried
@@ -559,6 +565,12 @@ def _redaction_result(cmd: dict, out_bytes: bytes, protection_applied: bool,
     if remove_text is not None:
         result["text_removal"] = {"removed": removal.get("removed", []),
                                   "kept": removal.get("kept", [])}
+    if cmd.get("side_text") is not None:
+        # Present exactly when the request carried ``side_text`` (v11), so a
+        # client can tell "rewrote nothing" from "this subprocess ignored it".
+        side_outcome = side_outcome or {}
+        result["side_text"] = {"applied": side_outcome.get("applied", 0),
+                               "skipped": side_outcome.get("skipped", [])}
     return result
 
 
@@ -581,6 +593,7 @@ def _op_apply_redactions(cmd: dict) -> dict:
     output_protection = cmd.get("output_protection")
     remove_text = cmd.get("remove_text")
     removal: dict = {}
+    side_outcome: dict = {}
     out_bytes, protection_applied = apply_redactions(
         pdf_bytes,
         matches,
@@ -592,9 +605,11 @@ def _op_apply_redactions(cmd: dict) -> dict:
         remove_text=remove_text,
         removal_sink=removal,
         keep_uncovered_lines=_keep_uncovered_lines(cmd),
+        side_text=cmd.get("side_text"),
+        side_text_sink=side_outcome,
     )
     return _redaction_result(cmd, out_bytes, protection_applied, remove_text,
-                             removal)
+                             removal, side_outcome)
 
 
 def _op_strip_metadata(cmd: dict) -> dict:
@@ -724,6 +739,19 @@ def _op_residue_report(cmd: dict) -> dict:
             raise ValueError("pages must be a list of integers")
         pages = set(pages)
     return {"report": residue_report_pdf(pdf_bytes, pages)}
+
+
+def _op_list_side_text(cmd: dict) -> dict:
+    """Strings a PDF carries outside its page content, with ids (v11+).
+
+    See `side_text.list_side_text`. Returns ``{"entries": [...],
+    "unreadable": n}``.
+    """
+    return list_side_text_pdf(_decode_pdf(cmd))
+
+
+def _op_list_side_text_h(cmd: dict) -> dict:
+    return list_side_text(_resolve_handle(_get_handle(cmd)))
 
 
 def _op_extract_text_plain(cmd: dict) -> dict:
@@ -945,6 +973,7 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
     output_protection = cmd.get("output_protection")
     remove_text = cmd.get("remove_text")
     removal: dict = {}
+    side_outcome: dict = {}
     out_bytes, protection_applied = _apply_redactions_doc(
         doc, matches,
         redact_label=redact_label,
@@ -955,9 +984,11 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
         remove_text=remove_text,
         removal_sink=removal,
         keep_uncovered_lines=_keep_uncovered_lines(cmd),
+        side_text=cmd.get("side_text"),
+        side_text_sink=side_outcome,
     )
     return _redaction_result(cmd, out_bytes, protection_applied, remove_text,
-                             removal)
+                             removal, side_outcome)
 
 
 def _op_strip_metadata_h(cmd: dict) -> dict:
@@ -1156,6 +1187,9 @@ _OPS = {
     # v9 text-removal preview
     "render_removed": _op_render_removed,
     "render_removed_h": _op_render_removed_h,
+    # v11 strings outside the page content
+    "list_side_text": _op_list_side_text,
+    "list_side_text_h": _op_list_side_text_h,
 }
 
 

@@ -82,6 +82,7 @@ redaction re-encodes the pixels it blanks.
        | "extract_pages" | "extract_pages_h"
        | "trace_text" | "trace_text_h"
        | "residue_report"
+       | "list_side_text" | "list_side_text_h"
        | "render_removed" | "render_removed_h"
        | "render_h" | "extract_native_h" | "extract_ocr_h"
        | "extract_text_dict_h" | "extract_text_plain_h"
@@ -270,6 +271,35 @@ that is the only place `apply_redactions` removes them.
 `extra_info_keys`, `page_metadata`, `piece_info` and `unknown_keys` count
 metadata beyond the eight standard `/Info` keys. `image_metadata` counts
 plain-DCT images still carrying a comment, EXIF or XMP segment.
+
+### `list_side_text`  *(v11+)*
+
+Strings a document carries outside its page content, each with an id a
+later `apply_redactions` on the **same bytes** can name in `side_text`.
+Read-only.
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` | base64 string | required (unencrypted) |
+
+**Result:**
+```json
+{"entries": [{"id": str, "kind": str, "text": str, "page": int | null}, ...],
+ "unreadable": int}
+```
+
+`kind` is one of `outline` (a bookmark title), `destination` (a named
+destination, from the `/Names` `/Dests` tree or the catalog `/Dests`
+dictionary), `page_label` (a page-label prefix), `layer` (an optional-content
+group name), `link` (the address of a URI link on a page or a bookmark) and
+`tag` (`/Alt` or `/ActualText` on a structure element). `page` is the 0-based
+page the string belongs to or points at, when there is one. `unreadable`
+counts structures that exist but could not be read; a client checking a file
+should treat a non-zero count as "could not check", never as clean.
+
+Ids are only meaningful for the bytes they were listed from. The name tree is
+walked object by object; the op never calls MuPDF's whole-tree name
+resolution.
 
 ### `trace_text`  *(v7+)*
 
@@ -478,6 +508,7 @@ Black-box redactions, optional metadata strip, optional re-encryption.
 | `output_protection` | dict \| null | null |
 | `remove_text` *(v7+)* | list of word dicts \| null | null |
 | `keep_uncovered_lines` *(0.11.0+)* | bool | `false` |
+| `side_text` *(v11+)* | list of edit dicts \| null | null |
 
 Match-dict shape:
 ```json
@@ -559,7 +590,23 @@ tallest letters; it is still text. A page on which nothing is kept burns
 exactly as without the flag, and so does every page when the flag is
 absent. An older subprocess ignores the field and burns the old way.
 
+`side_text` (v11+) rewrites strings outside the page content before anything
+else happens to the document. Each edit is `{"id": str, "text": str}` (replace
+the string) or `{"id": str, "remove": true}` (remove it), with ids from
+`list_side_text` on the same bytes. Replacing applies to `outline`,
+`destination`, `page_label`, `layer` and `tag` entries; removing applies to
+`link` entries (the link annotation goes and the page is unchanged, or a
+bookmark loses its URI action) and to `tag` entries. Renaming a destination
+re-points every `/Dest` and go-to `/D` in the file that named it and rebuilds
+the destination tree as one sorted leaf; a link from another file to the old
+name no longer resolves. A rename that would leave two destinations with one
+name is skipped as a whole. An edit whose id does not resolve, or whose kind
+cannot take that action, is skipped and changes nothing. A malformed edit
+returns `error_type: "ValueError"` before anything is changed.
+
 **Result:** `{"pdf_b64": str, "protection_applied": bool}`, plus, **exactly
+when the request carried `side_text`**, `"side_text": {"applied": int,
+"skipped": [id, ...]}`, plus, **exactly
 when the request carried `remove_text`**, `"text_removal": {"removed":
 [[page, index], ...], "kept": [[page, index], ...]}`. `index` is the entry's
 position among that page's entries. A `kept` word was not found, or could not
@@ -813,6 +860,7 @@ The following ops accept `handle` (string, required) instead of `pdf_b64`:
 | `extract_text_plain` | `extract_text_plain_h` | `{"text": str}` |
 | `trace_text` | `trace_text_h` | `{"rect": [...], "rotation": int, "image_cover": float, "words": [...]}` |
 | `residue_report` | — | `{"report": {...}}` |
+| `list_side_text` | `list_side_text_h` | `{"entries": [...], "unreadable": int}` |
 | `render_removed` | `render_removed_h` | `{"png_b64": str, "lost": [...], "kept": [...], "missed": [...]}` |
 | `search_for` | `search_for_h` | `{"rects": [...]}` |
 | `apply_redactions` | `apply_redactions_h` | `{"pdf_b64": str, "protection_applied": bool}` |
@@ -916,3 +964,4 @@ shipping client has caught up.
 | 0.11.3 | 9 | No new ops, no wire-surface change. The subprocess loads every module of the package when it starts: `annotations`, `keep_lines` and `ocr` were loaded on first use, by `list_annotations`, the first `apply_redactions` and the first OCR extract. A subprocess outlives the files it started from when the package is reinstalled under it, and a module loaded after that is the new release calling into the old one already in memory. From 0.11.0 to 0.11.1 that was an `ImportError` on every `apply_redactions` in a subprocess that started on 0.11.0 and burned for the first time after the reinstall. A running subprocess now keeps the release it started with. `PROTOCOL_VERSION` stays 9. |
 | 0.11.4 | 9 | No new ops, no wire-surface change. `apply_redactions` (+ `_h`) burns a box the payload repeats on a page once: a box identical to one already listed on its page (same rect, label and font size) is left out. Burning it again removed nothing more and drew the same fill in the same place, but it was not free: PyMuPDF's `add_redact_annot` rescans every annotation on the page to name the new one and `apply_redactions` rescans them to load each, so a page's burn grows with the square of its box count (pymupdf 1.28.2: about 5 s for 1,000 boxes on one page, 24 s for 2,000), and `keep_uncovered_lines` pays it once per pass. A payload that repeats its boxes now burns to the same bytes as one that sends each box once (trailer `/ID` aside); a payload with no repeated box burns exactly as before. A box repeated with another label, or on another page, is still burned. `PROTOCOL_VERSION` stays 9. |
 | 0.12.0 | **10** | PDFs by path. Every op that takes `pdf_b64` also takes `pdf_path` (read, never written), and every op that returns a PDF writes it to an optional `out_path` and answers `pdf_path` + `pdf_size` in place of `pdf_b64` (created exclusively, owner-only; no error names a path). A response over the 256 MiB frame limit, which a burned PDF of about 200 MB is once base64, is answered with an `OverflowError` error frame and the subprocess keeps serving; until 0.12.0 it escaped `main()` and the subprocess exited having written nothing, which a client can only read as a crash. See **PDFs by path**. |
+| 0.13.0 | **11** | Adds `list_side_text` (+ `list_side_text_h`): the strings a document carries outside its page content (bookmark titles, named destinations, page-label prefixes, optional-content group names, URI link addresses, and `/Alt` and `/ActualText` on structure elements), each with an id, a page and its text, and a count of structures that could not be read. `apply_redactions` (+ `_h`) gains the optional `side_text` field, which rewrites named strings before the burn and answers `"side_text": {"applied", "skipped"}`. Without the field every burn is unchanged. The supported set widens to {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}. |
