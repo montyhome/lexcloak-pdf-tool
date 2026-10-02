@@ -102,6 +102,12 @@ from lexcloak_pdf_tool.remove_text import render_removed_doc, validate_remove_te
 from lexcloak_pdf_tool.render import _render_page_doc
 from lexcloak_pdf_tool.sanitise import residue_report_pdf
 from lexcloak_pdf_tool.side_text import list_side_text, list_side_text_pdf
+from lexcloak_pdf_tool.unseen import (
+    list_tag_text,
+    list_tag_text_pdf,
+    list_unseen_images,
+    list_unseen_images_pdf,
+)
 from lexcloak_pdf_tool.trace import _trace_text_doc, trace_text
 
 # The modules the ops load on first use are loaded here, at start, so a
@@ -183,11 +189,16 @@ _pymupdf.set_messages(stream=sys.stderr)
 # carries outside its page content, with stable ids) and the optional
 # ``side_text`` field on both apply_redactions ops, which rewrites the named
 # strings before the burn.
+# v12 (0.14.0) adds ``list_unseen_images``/``_h`` (image placements and
+# whether the page shows each) and ``list_tag_text``/``_h`` (where text
+# extraction's text differs from the glyphs drawn), the optional
+# ``blank_images``, ``remove_images`` and ``strip_tags_pages`` fields on both apply_redactions
+# ops, and ``drawn_only`` on both extract_text_plain ops.
 # Older versions stay supported so a newer
 # subprocess can still serve older clients cleanly; once every shipping
 # client speaks v4+, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 11
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+PROTOCOL_VERSION = 12
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -551,7 +562,8 @@ def _op_search_for(cmd: dict) -> dict:
 
 def _redaction_result(cmd: dict, out_bytes: bytes, protection_applied: bool,
                       remove_text, removal: dict,
-                      side_outcome: dict | None = None) -> dict:
+                      side_outcome: dict | None = None,
+                      unseen_outcome: dict | None = None) -> dict:
     """Response for both apply_redactions ops.
 
     ``text_removal`` is present exactly when the request carried
@@ -571,6 +583,14 @@ def _redaction_result(cmd: dict, out_bytes: bytes, protection_applied: bool,
         side_outcome = side_outcome or {}
         result["side_text"] = {"applied": side_outcome.get("applied", 0),
                                "skipped": side_outcome.get("skipped", [])}
+    if cmd.get("blank_images") is not None or cmd.get("remove_images") is not None:
+        # Present exactly when the request carried either field (v12).
+        unseen_outcome = unseen_outcome or {}
+        result["unseen_images"] = {
+            "blanked": unseen_outcome.get("blanked", 0),
+            "removed": unseen_outcome.get("removed", 0),
+            "skipped_blank": unseen_outcome.get("skipped_blank", []),
+            "skipped_remove": unseen_outcome.get("skipped_remove", [])}
     return result
 
 
@@ -594,6 +614,7 @@ def _op_apply_redactions(cmd: dict) -> dict:
     remove_text = cmd.get("remove_text")
     removal: dict = {}
     side_outcome: dict = {}
+    unseen_outcome: dict = {}
     out_bytes, protection_applied = apply_redactions(
         pdf_bytes,
         matches,
@@ -607,9 +628,13 @@ def _op_apply_redactions(cmd: dict) -> dict:
         keep_uncovered_lines=_keep_uncovered_lines(cmd),
         side_text=cmd.get("side_text"),
         side_text_sink=side_outcome,
+        blank_images=cmd.get("blank_images"),
+        remove_images=cmd.get("remove_images"),
+        strip_tags_pages=cmd.get("strip_tags_pages"),
+        unseen_sink=unseen_outcome,
     )
     return _redaction_result(cmd, out_bytes, protection_applied, remove_text,
-                             removal, side_outcome)
+                             removal, side_outcome, unseen_outcome)
 
 
 def _op_strip_metadata(cmd: dict) -> dict:
@@ -754,10 +779,37 @@ def _op_list_side_text_h(cmd: dict) -> dict:
     return list_side_text(_resolve_handle(_get_handle(cmd)))
 
 
+def _op_list_unseen_images(cmd: dict) -> dict:
+    """Image placements and whether the page shows each (v12+). See
+    `unseen.list_unseen_images_pdf`."""
+    return list_unseen_images_pdf(_decode_pdf(cmd))
+
+
+def _op_list_unseen_images_h(cmd: dict) -> dict:
+    return list_unseen_images(_resolve_handle(_get_handle(cmd)))
+
+
+def _op_list_tag_text(cmd: dict) -> dict:
+    """Where text extraction's text differs from the glyphs drawn (v12+).
+    See `unseen.list_tag_text`."""
+    return list_tag_text_pdf(_decode_pdf(cmd))
+
+
+def _op_list_tag_text_h(cmd: dict) -> dict:
+    return list_tag_text(_resolve_handle(_get_handle(cmd)))
+
+
+def _drawn_only(cmd: dict) -> bool:
+    value = cmd.get("drawn_only", False)
+    if not isinstance(value, bool):
+        raise ValueError("drawn_only must be a boolean")
+    return value
+
+
 def _op_extract_text_plain(cmd: dict) -> dict:
     pdf_bytes = _decode_pdf(cmd)
     page = int(cmd.get("page", 0))
-    return {"text": extract_text_plain(pdf_bytes, page)}
+    return {"text": extract_text_plain(pdf_bytes, page, _drawn_only(cmd))}
 
 
 def _op_get_metadata(cmd: dict) -> dict:
@@ -942,7 +994,7 @@ def _op_render_removed_h(cmd: dict) -> dict:
 def _op_extract_text_plain_h(cmd: dict) -> dict:
     doc = _resolve_handle(_get_handle(cmd))
     page = int(cmd.get("page", 0))
-    return {"text": _extract_text_plain_doc(doc, page)}
+    return {"text": _extract_text_plain_doc(doc, page, _drawn_only(cmd))}
 
 
 def _op_search_for_h(cmd: dict) -> dict:
@@ -974,6 +1026,7 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
     remove_text = cmd.get("remove_text")
     removal: dict = {}
     side_outcome: dict = {}
+    unseen_outcome: dict = {}
     out_bytes, protection_applied = _apply_redactions_doc(
         doc, matches,
         redact_label=redact_label,
@@ -986,9 +1039,13 @@ def _op_apply_redactions_h(cmd: dict) -> dict:
         keep_uncovered_lines=_keep_uncovered_lines(cmd),
         side_text=cmd.get("side_text"),
         side_text_sink=side_outcome,
+        blank_images=cmd.get("blank_images"),
+        remove_images=cmd.get("remove_images"),
+        strip_tags_pages=cmd.get("strip_tags_pages"),
+        unseen_sink=unseen_outcome,
     )
     return _redaction_result(cmd, out_bytes, protection_applied, remove_text,
-                             removal, side_outcome)
+                             removal, side_outcome, unseen_outcome)
 
 
 def _op_strip_metadata_h(cmd: dict) -> dict:
@@ -1190,6 +1247,11 @@ _OPS = {
     # v11 strings outside the page content
     "list_side_text": _op_list_side_text,
     "list_side_text_h": _op_list_side_text_h,
+    # v12 content the page does not show
+    "list_unseen_images": _op_list_unseen_images,
+    "list_unseen_images_h": _op_list_unseen_images_h,
+    "list_tag_text": _op_list_tag_text,
+    "list_tag_text_h": _op_list_tag_text_h,
 }
 
 

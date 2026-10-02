@@ -524,5 +524,5 @@ def test_the_handle_ops_list_and_rewrite():
 
 
 def test_protocol_11_carries_the_new_op():
-    assert PROTOCOL_VERSION == 11
+    assert PROTOCOL_VERSION >= 11
     assert "list_side_text" in _OPS and "list_side_text_h" in _OPS

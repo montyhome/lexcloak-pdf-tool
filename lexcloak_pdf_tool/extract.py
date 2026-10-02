@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+import pymupdf as _pymupdf
+
 from .redact import Rect, open_pdf
 
 
@@ -137,22 +139,28 @@ def extract_text_dict(pdf_bytes: bytes, page_num: int) -> list[dict]:
         doc.close()
 
 
-def _extract_text_plain_doc(doc, page_num: int) -> str:
+def _extract_text_plain_doc(doc, page_num: int, drawn_only: bool = False) -> str:
     if page_num < 0 or page_num >= len(doc):
         raise IndexError(
             f"page_num {page_num} out of range for {len(doc)}-page document"
         )
+    if drawn_only:
+        return doc[page_num].get_text(
+            flags=_pymupdf.TEXTFLAGS_TEXT | _pymupdf.TEXT_IGNORE_ACTUALTEXT)
     return doc[page_num].get_text()
 
 
-def extract_text_plain(pdf_bytes: bytes, page_num: int) -> str:
+def extract_text_plain(pdf_bytes: bytes, page_num: int,
+                       drawn_only: bool = False) -> str:
     """Return PyMuPDF's ``page.get_text()`` plain-text output for ``page_num``.
 
-    Native text only -- not the OCR path.
+    Native text only -- not the OCR path. With ``drawn_only`` (v0.14.0) the
+    text is the glyphs the page draws: ``/ActualText`` is not substituted for
+    them (see ``unseen.list_tag_text``).
     """
     doc = open_pdf(pdf_bytes)
     try:
-        return _extract_text_plain_doc(doc, page_num)
+        return _extract_text_plain_doc(doc, page_num, drawn_only)
     finally:
         doc.close()
 

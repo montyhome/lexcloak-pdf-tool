@@ -44,6 +44,12 @@ of the same name.
                                names, link addresses, structure alternate
                                text), each with an id ``apply_redactions``'s
                                ``side_text`` field can rewrite.
+* ``list_unseen_images_pdf`` -- image placements and whether the page, as it
+                               opens, shows each (``blank_images`` on
+                               ``apply_redactions`` blanks named images).
+* ``list_tag_text_pdf``     -- where text extraction's text differs from the
+                               glyphs drawn (``/ActualText``);
+                               ``strip_tags_pages`` removes such tags.
 
 Plus ``pymupdf_version()`` (probe) and CharData serialization helpers in
 ``lexcloak_pdf_tool.coords``.
@@ -61,7 +67,7 @@ version = _pymupdf.version
 #: back to it when ``importlib.metadata`` has no dist-info to read (e.g. inside
 #: the frozen PyInstaller bundle). Keep it a plain string literal so
 #: setuptools can extract it statically without importing this module.
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 
 def pymupdf_version() -> str:
@@ -83,6 +89,7 @@ from .encryption import decrypt_pdf, encrypt, WrongPasswordError  # noqa: E402
 from .page_split import extract_pages  # noqa: E402
 from .reduce_size import reduce_size  # noqa: E402
 from .side_text import list_side_text_pdf  # noqa: E402
+from .unseen import list_tag_text_pdf, list_unseen_images_pdf  # noqa: E402
 from .metadata import (  # noqa: E402
     page_count,
     page_size,
@@ -126,6 +133,8 @@ __all__ = [
     "reduce_size",
     "extract_pages",
     "list_side_text_pdf",
+    "list_unseen_images_pdf",
+    "list_tag_text_pdf",
     # Library-only CharData helpers
     "search_in_chars",
     "search_whole_word_in_chars",
