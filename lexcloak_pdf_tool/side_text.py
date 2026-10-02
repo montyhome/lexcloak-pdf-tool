@@ -434,6 +434,10 @@ def _apply_one(doc, locator: tuple, edit: dict) -> bool:
         if what == "tag" and edit["remove"]:
             _m.pdf_dict_dels(locator[1], locator[2])
             return True
+        if edit["text"] is None:
+            # A removal for a kind that cannot be removed. ``rewrite_side_text``
+            # already skips it; a null text reaching MuPDF crashes the process.
+            return False
         key = {"outline": "Title", "label": "P", "layer": "Name",
                "tag": locator[2] if what == "tag" else None}[what]
         _m.pdf_dict_puts(locator[1], key, _m.pdf_new_text_string(edit["text"]))

@@ -327,6 +327,47 @@ def test_a_rename_onto_an_existing_destination_is_skipped_as_a_whole():
     assert _readable(out, "HaroldPembertonDeposition")
 
 
+def test_the_rebuilt_destination_tree_is_in_key_order():
+    """Readers look a name up by binary search, so a rename that moves a key
+    must move its entry too."""
+    doc = _doc()
+    doc.xref_set_key(doc.pdf_catalog(), "Names",
+                     f"<</Dests <</Names [(alpha) [{doc[0].xref} 0 R /Fit] "
+                     f"(Pemberton) [{doc[1].xref} 0 R /Fit] "
+                     f"(mike) [{doc[0].xref} 0 R /Fit]]>>>>")
+    src = _bytes(doc)
+    target = _by_text(list_side_text_pdf(src))["Pemberton"]
+    out, _ = apply_redactions(src, [], side_text=[{"id": target["id"],
+                                                   "text": "zz-destination"}])
+    keys = [e["text"] for e in list_side_text_pdf(out)["entries"]
+            if e["kind"] == "destination"]
+    assert keys == ["alpha", "mike", "zz-destination"]
+
+
+def test_a_rename_is_refused_when_a_tree_entry_could_not_be_read():
+    """Rebuilding the tree from what was read would silently drop the entry
+    that was not, so the rename is skipped and the tree left as it was."""
+    doc = _doc()
+    doc.xref_set_key(doc.pdf_catalog(), "Names",
+                     f"<</Dests <</Names [(Pemberton) [{doc[1].xref} 0 R /Fit] "
+                     f"17 [{doc[0].xref} 0 R /Fit]]>>>>")
+    src = _bytes(doc)
+    listing = list_side_text_pdf(src)
+    assert listing["unreadable"] == 1
+    target = _by_text(listing)["Pemberton"]
+    sink: dict = {}
+    out, _ = apply_redactions(src, [], side_text=[{"id": target["id"],
+                                                   "text": "destination-1"}],
+                              side_text_sink=sink)
+    assert sink == {"applied": 0, "skipped": [target["id"]]}
+    d = pymupdf.open(stream=out, filetype="pdf")
+    try:
+        names = d.xref_get_key(d.pdf_catalog(), "Names/Dests/Names")[1]
+    finally:
+        d.close()
+    assert "Pemberton" in names and "17" in names
+
+
 def test_an_unknown_id_and_an_action_its_kind_cannot_take_are_skipped():
     src = _every_kind()
     ids = _by_text(list_side_text_pdf(src))
