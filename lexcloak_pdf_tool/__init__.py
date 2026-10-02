@@ -39,6 +39,11 @@ of the same name.
 * ``reduce_size``           -- local size reduction: scrub + font subset +
                                optional DPI image downsample (opt-in, lossy)
                                + opt-in ``preserve_metadata`` carry-across.
+* ``list_side_text_pdf``    -- strings outside the page content (bookmark
+                               titles, destination names, page labels, layer
+                               names, link addresses, structure alternate
+                               text), each with an id ``apply_redactions``'s
+                               ``side_text`` field can rewrite.
 
 Plus ``pymupdf_version()`` (probe) and CharData serialization helpers in
 ``lexcloak_pdf_tool.coords``.
@@ -56,7 +61,7 @@ version = _pymupdf.version
 #: back to it when ``importlib.metadata`` has no dist-info to read (e.g. inside
 #: the frozen PyInstaller bundle). Keep it a plain string literal so
 #: setuptools can extract it statically without importing this module.
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 
 def pymupdf_version() -> str:
@@ -77,6 +82,7 @@ from .cover_page import insert_cover_page  # noqa: E402
 from .encryption import decrypt_pdf, encrypt, WrongPasswordError  # noqa: E402
 from .page_split import extract_pages  # noqa: E402
 from .reduce_size import reduce_size  # noqa: E402
+from .side_text import list_side_text_pdf  # noqa: E402
 from .metadata import (  # noqa: E402
     page_count,
     page_size,
@@ -119,6 +125,7 @@ __all__ = [
     "WrongPasswordError",
     "reduce_size",
     "extract_pages",
+    "list_side_text_pdf",
     # Library-only CharData helpers
     "search_in_chars",
     "search_whole_word_in_chars",

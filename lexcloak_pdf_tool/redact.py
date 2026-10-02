@@ -7,6 +7,7 @@ import logging
 import pymupdf as _pymupdf
 
 from .sanitise import drop_javascript_names, sanitise_document, strip_extra_metadata
+from .side_text import rewrite_side_text, validate_side_text_edits
 
 PDF_ENCRYPT_AES_256 = _pymupdf.PDF_ENCRYPT_AES_256
 PDF_PERM_ACCESSIBILITY = _pymupdf.PDF_PERM_ACCESSIBILITY
@@ -623,6 +624,8 @@ def _apply_redactions_doc(doc, matches: list[dict],
                           remove_text: list | None = None,
                           removal_sink: dict | None = None,
                           keep_uncovered_lines: bool = False,
+                          side_text: list | None = None,
+                          side_text_sink: dict | None = None,
                           ) -> tuple[bytes, bool]:
     """Apply redactions to an open ``pymupdf.Document`` and return (bytes, protected).
 
@@ -668,6 +671,18 @@ def _apply_redactions_doc(doc, matches: list[dict],
     _validate_redaction_payload(matches, removed_pages, blackout_pages)
     removal_plan = (validate_remove_text(remove_text)
                     if remove_text is not None else None)
+    side_edits = (validate_side_text_edits(side_text)
+                  if side_text is not None else None)
+    # v0.13.0: rewrite the strings the caller named outside the page content
+    # (bookmark titles, destination names, page labels, layer names, link
+    # addresses, structure alternate text) FIRST, while every object still has
+    # the number ``list_side_text`` reported for this source. Nothing below
+    # renumbers until the save, but page removal drops objects, so the rewrite
+    # cannot wait. See ``side_text``.
+    if side_edits is not None:
+        outcome = rewrite_side_text(doc, side_edits)
+        if side_text_sink is not None:
+            side_text_sink.update(outcome)
     # Flatten form fields BEFORE redacting: a widget /V survives a redaction
     # box otherwise (see _flatten_form_fields). No-op for non-form PDFs.
     _flatten_form_fields(doc)
@@ -753,8 +768,18 @@ def _apply_redactions_doc(doc, matches: list[dict],
         valid_removed = {p for p in removed_set if 0 <= p < len(doc)}
         if valid_removed and len(valid_removed) >= len(doc):
             raise ValueError("Cannot export: all pages have been removed")
+        removed_xrefs = [doc[p].xref for p in valid_removed]
         for pg_num in sorted(valid_removed, reverse=True):
             doc.delete_page(pg_num)
+        # v0.13.0: deleting a page takes it out of the page tree, but anything
+        # else that names the page object keeps it, and its content, in the
+        # saved file. A structure element's /Pg and a named destination's
+        # target array both do: a removed page's text shipped in the export
+        # whenever the document was tagged or had named destinations. Writing
+        # the object as null leaves those references pointing at nothing, and
+        # the save's garbage collection drops the content they kept alive.
+        for xref in removed_xrefs:
+            doc.update_object(xref, "null")
 
     # Strip residue that lives OUTSIDE page content streams (annotation text,
     # attachments, document JavaScript, pre-burn page thumbnails) -- none of it
@@ -793,6 +818,8 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
                      remove_text: list | None = None,
                      removal_sink: dict | None = None,
                      keep_uncovered_lines: bool = False,
+                     side_text: list | None = None,
+                     side_text_sink: dict | None = None,
                      ) -> tuple[bytes, bool]:
     """Black-box redact enabled matches, return (new PDF bytes, protection_applied).
 
@@ -831,6 +858,12 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
     keep_uncovered_lines
         Keep the text of a line a box does not reach (v0.11.0; see
         ``_apply_redactions_doc``). Default False, the historical burn.
+    side_text
+        Optional rewrites of strings outside the page content (v0.13.0): a
+        list of ``{"id": str, "text": str}`` or ``{"id": str, "remove": true}``
+        whose ids come from ``list_side_text`` on these same bytes. Applied
+        before anything else. ``side_text_sink`` receives ``{"applied": n,
+        "skipped": [id, ...]}``. ``None`` (the default) changes nothing.
 
     Returns
     -------
@@ -862,6 +895,8 @@ def apply_redactions(pdf_bytes: bytes, matches: list[dict],
             remove_text=remove_text,
             removal_sink=removal_sink,
             keep_uncovered_lines=keep_uncovered_lines,
+            side_text=side_text,
+            side_text_sink=side_text_sink,
         )
     finally:
         doc.close()
