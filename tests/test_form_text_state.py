@@ -476,3 +476,29 @@ def test_a_form_an_unsafe_page_also_shows_keeps_mupdfs_content():
     assert outer_form(ours) == outer_form(plain)
     assert form_state.PREFIX in ours[0].read_contents()
     assert form_state.PREFIX not in ours[1].read_contents()
+
+
+def test_a_page_that_cannot_be_inspected_is_redacted_as_mupdf_would(monkeypatch):
+    """Listing the page's XObjects raises: the redaction still applies and
+    nothing is raised, as before this module."""
+    doc = _page(LAYER + b"q /Fm0 Do Q", STAMP_FORM)
+    doc[0].add_redact_annot(HIT, fill=False)
+
+    def unreadable(self, *a, **kw):
+        raise RuntimeError("resources do not read")
+    monkeypatch.setattr(pymupdf.Page, "get_xobjects", unreadable)
+    assert apply_page_redactions(doc[0], **REMOVE_ONLY) is False
+    monkeypatch.undo()
+    assert b"Qwzv" not in _streams(doc)
+
+
+def test_an_object_that_is_not_a_document_page_is_passed_through():
+    """Callers may hand in a page-like object (a test double): it gets
+    ``apply_redactions`` called exactly as before."""
+    calls = []
+
+    class Page:
+        def apply_redactions(self, **kw):
+            calls.append(kw)
+    assert apply_page_redactions(Page(), text=1) is False
+    assert calls == [{"text": 1}]

@@ -225,8 +225,14 @@ class _Reading:
 
 
 def _has_forms(page) -> bool:
-    doc = page.parent
-    return any(_is_form(doc, xref) for xref, _, _, _ in page.get_xobjects())
+    """Whether the page shows any form. A page that cannot be inspected
+    (its resources do not read, or it is not a document's page) reads as
+    having none, so it is redacted and saved exactly as MuPDF would."""
+    try:
+        doc = page.parent
+        return any(_is_form(doc, xref) for xref, _, _, _ in page.get_xobjects())
+    except Exception:  # noqa: BLE001 -- inspection must never fail a burn
+        return False
 
 
 def _read_page(doc, page) -> _Reading | None:
@@ -316,8 +322,11 @@ def apply_page_redactions(page, **kwargs) -> bool:
     page.apply_redactions(**kwargs)
     if reading is None or not reading.safe or not reading.at_risk:
         return False
-    instances = {x for x, _, _, _ in page.get_xobjects()
-                 if x >= first_new and _is_form(doc, x)}
+    try:
+        instances = {x for x, _, _, _ in page.get_xobjects()
+                     if x >= first_new and _is_form(doc, x)}
+    except Exception:  # noqa: BLE001 -- leave the page as MuPDF wrote it
+        return False
     return _restore(doc, page, instances, lambda x: x >= first_new)
 
 
@@ -348,20 +357,23 @@ def save_document(doc, **kwargs) -> bytes:
     if not restore:
         return buf.getvalue()
     shown_by: dict[int, set[int]] = {}
-    for page in doc:
-        for xref, _, _, _ in page.get_xobjects():
-            if _is_form(doc, xref):
-                shown_by.setdefault(xref, set()).add(page.number)
     done: set[int] = set()
     changed = False
-    for pno in sorted(restore):
-        page = doc[pno]
-        forms = {x for x, _, _, _ in page.get_xobjects()
-                 if _is_form(doc, x) and x not in done
-                 and not shown_by.get(x, set()) & blocked}
-        if _restore(doc, page, forms, lambda x: True):
-            changed = True
-        done |= forms
+    try:
+        for page in doc:
+            for xref, _, _, _ in page.get_xobjects():
+                if _is_form(doc, xref):
+                    shown_by.setdefault(xref, set()).add(page.number)
+        for pno in sorted(restore):
+            page = doc[pno]
+            forms = {x for x, _, _, _ in page.get_xobjects()
+                     if _is_form(doc, x) and x not in done
+                     and not shown_by.get(x, set()) & blocked}
+            if _restore(doc, page, forms, lambda x: True):
+                changed = True
+            done |= forms
+    except Exception:  # noqa: BLE001 -- the clean save already in hand stands
+        return buf.getvalue()
     if not changed:
         return buf.getvalue()
     buf = io.BytesIO()
