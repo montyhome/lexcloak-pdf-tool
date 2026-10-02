@@ -768,8 +768,18 @@ def _apply_redactions_doc(doc, matches: list[dict],
         valid_removed = {p for p in removed_set if 0 <= p < len(doc)}
         if valid_removed and len(valid_removed) >= len(doc):
             raise ValueError("Cannot export: all pages have been removed")
+        removed_xrefs = [doc[p].xref for p in valid_removed]
         for pg_num in sorted(valid_removed, reverse=True):
             doc.delete_page(pg_num)
+        # v0.13.0: deleting a page takes it out of the page tree, but anything
+        # else that names the page object keeps it, and its content, in the
+        # saved file. A structure element's /Pg and a named destination's
+        # target array both do: a removed page's text shipped in the export
+        # whenever the document was tagged or had named destinations. Writing
+        # the object as null leaves those references pointing at nothing, and
+        # the save's garbage collection drops the content they kept alive.
+        for xref in removed_xrefs:
+            doc.update_object(xref, "null")
 
     # Strip residue that lives OUTSIDE page content streams (annotation text,
     # attachments, document JavaScript, pre-burn page thumbnails) -- none of it
