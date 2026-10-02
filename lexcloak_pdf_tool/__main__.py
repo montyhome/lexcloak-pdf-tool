@@ -69,6 +69,7 @@ from lexcloak_pdf_tool import (
 )
 from lexcloak_pdf_tool.coords import deserialize_chardata, serialize_chardata
 from lexcloak_pdf_tool.cover_page import _insert_cover_page_doc
+from lexcloak_pdf_tool.form_state import save_document
 from lexcloak_pdf_tool.page_split import extract_pages, extract_pages_from_doc
 # Doc-variant helpers for the v4 stateful handle protocol. These take an
 # already-open ``pymupdf.Document`` and reuse the same body as the bytes
@@ -1059,7 +1060,7 @@ def _op_strip_metadata_h(cmd: dict) -> dict:
     doc = _resolve_handle(_get_handle(cmd))
     _strip_metadata_doc(doc)
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True, clean=True)
+    buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
     return _pdf_result(cmd, buf.getvalue())
 
 
@@ -1077,7 +1078,7 @@ def _op_set_metadata_h(cmd: dict) -> dict:
         raise ValueError("op requires 'fields' dict")
     _set_metadata_doc(doc, fields)
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True, clean=True)
+    buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
     return _pdf_result(cmd, buf.getvalue())
 
 
@@ -1096,14 +1097,14 @@ def _op_insert_cover_page_h(cmd: dict) -> dict:
         raise ValueError("op requires 'context' dict")
     _insert_cover_page_doc(doc, context)
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True, clean=True)
+    buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
     return _pdf_result(cmd, buf.getvalue())
 
 
 def _save_doc_bytes(doc) -> bytes:
     """Serialize a live ``pymupdf.Document`` with the standard save params."""
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True, clean=True)
+    buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
     return buf.getvalue()
 
 

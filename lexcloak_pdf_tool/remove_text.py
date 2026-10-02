@@ -49,9 +49,10 @@ from collections import Counter
 
 import pymupdf as _pymupdf
 
+from .form_state import apply_page_redactions
 from .redact import Rect, _derotate_to_native
 from .render import _render_page_doc
-from .trace import _every_layer_drawn, _has_layers, _span_words
+from .trace import _every_layer_drawn, _has_layers, _key, _span_words
 
 #: Band heights tried, as shares of a word box's height, narrowest first.
 BANDS = (0.1, 0.3, 0.6)
@@ -119,7 +120,7 @@ def _band(page, box, share: float):
 def _apply(page, bands) -> None:
     for band in bands:
         page.add_redact_annot(band, fill=False)
-    page.apply_redactions(images=_pymupdf.PDF_REDACT_IMAGE_NONE,
+    apply_page_redactions(page, images=_pymupdf.PDF_REDACT_IMAGE_NONE,
                           graphics=_pymupdf.PDF_REDACT_LINE_ART_NONE,
                           text=_pymupdf.PDF_REDACT_TEXT_REMOVE)
 
@@ -131,6 +132,27 @@ def _keys_with_layers_on(doc, page_index: int) -> tuple[list[dict], Counter]:
     with _every_layer_drawn(doc, page_index) as page:
         words = _page_words(page)
     return words, Counter(k for w in words for k in w["keys"])
+
+
+def _key_counts(doc, page_index: int) -> Counter:
+    """The character keys ``_keys_with_layers_on`` counts, without its words.
+
+    ``_clean`` compares keys only, twice per trial, and building every
+    word's box and a ``Rect`` per character was most of a trial's cost
+    (v0.14.1). The keys are built exactly as ``_page_words`` builds them.
+    """
+    with _every_layer_drawn(doc, page_index) as page:
+        spans = page.get_texttrace()
+    keys: Counter = Counter()
+    for span in spans:
+        props = (int(span.get("type", 0)), round(float(span.get("opacity", 1.0)), 3),
+                 span.get("layer") or "",
+                 tuple(round(float(c), 3) for c in (span.get("color") or ())))
+        for ch in span.get("chars", ()):
+            c = chr(ch[0])
+            if not c.isspace():
+                keys[_key(c, ch[2]) + props] += 1
+    return keys
 
 
 def _cell(key: tuple) -> tuple[tuple, int, int]:
@@ -206,11 +228,11 @@ def _clean(doc, pno: int, targets: list[tuple[dict, float]]) -> bool:
     try:
         scratch.insert_pdf(doc, from_page=pno, to_page=pno)
         page = scratch[0]
-        _, before = _keys_with_layers_on(scratch, 0)
+        before = _key_counts(scratch, 0)
         target = Counter(k for part, _ in targets for k in part["keys"])
         others = _unpaired(before, target)
         _apply(page, [b for part, s in targets for b in _bands(page, part, s)])
-        _, after = _keys_with_layers_on(scratch, 0)
+        after = _key_counts(scratch, 0)
         # Whatever is on the page beyond the other text must not be a target.
         extra = _unpaired(after, others)
         return not _unpaired(others, after) and _unpaired(target, extra) == target

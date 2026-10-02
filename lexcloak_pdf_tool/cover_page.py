@@ -22,6 +22,7 @@ import io
 
 import pymupdf as _pymupdf
 
+from .form_state import save_document
 from .redact import open_pdf
 
 
@@ -154,7 +155,7 @@ def insert_cover_page(pdf_bytes: bytes, context: dict) -> bytes:
     try:
         _insert_cover_page_doc(doc, context)
         buf = io.BytesIO()
-        doc.save(buf, garbage=4, deflate=True, clean=True)
+        buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
     finally:
         doc.close()
     return buf.getvalue()

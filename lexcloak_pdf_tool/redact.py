@@ -6,6 +6,7 @@ import logging
 
 import pymupdf as _pymupdf
 
+from .form_state import apply_page_redactions, save_document
 from .sanitise import drop_javascript_names, sanitise_document, strip_extra_metadata
 from .side_text import rewrite_side_text, validate_side_text_edits
 from .unseen import (
@@ -151,7 +152,7 @@ def strip_metadata(pdf_bytes_or_doc):
         try:
             _strip_metadata_doc(doc)
             buf = io.BytesIO()
-            doc.save(buf, garbage=4, deflate=True, clean=True)
+            buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
         finally:
             doc.close()
         return buf.getvalue()
@@ -500,7 +501,7 @@ def _derotate_to_native(rect, page):
 def _save_clean(doc) -> bytes:
     """Serialize ``doc`` to unencrypted bytes with the standard save params."""
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True, clean=True)
+    buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
     return buf.getvalue()
 
 
@@ -520,8 +521,8 @@ def _save_encrypted(doc, password: str) -> tuple[bytes, bool]:
     """
     buf = io.BytesIO()
     try:
-        doc.save(
-            buf,
+        buf.write(save_document(
+            doc,
             garbage=4,
             deflate=True,
             clean=True,
@@ -529,7 +530,7 @@ def _save_encrypted(doc, password: str) -> tuple[bytes, bool]:
             user_pw=password,
             owner_pw=password,
             permissions=int(PDF_PERM_ACCESSIBILITY),
-        )
+        ))
         return buf.getvalue(), True
     except Exception as exc:  # noqa: BLE001 -- degrade to unprotected, never block
         logging.getLogger(__name__).warning(
@@ -768,7 +769,7 @@ def _apply_redactions_doc(doc, matches: list[dict],
                 doc, pg_num, boxes, _add_burn_annots):
             continue
         _add_burn_annots(page, boxes)
-        page.apply_redactions()
+        apply_page_redactions(page)
 
     # Full-page blackout: cover each blackout page edge-to-edge
     # in solid black and SCRUB the content beneath it. Runs before the
@@ -794,7 +795,7 @@ def _apply_redactions_doc(doc, matches: list[dict],
         rect = Rect(rect.x0 - _EDGE_OVERSCAN, rect.y0 - _EDGE_OVERSCAN,
                     rect.x1 + _EDGE_OVERSCAN, rect.y1 + _EDGE_OVERSCAN)
         page.add_redact_annot(rect, fill=(0, 0, 0))
-        page.apply_redactions()
+        apply_page_redactions(page)
 
     # The pages a redaction burned or removed text from, in the indices they
     # will have once removed pages are deleted: a tag on one of them can still

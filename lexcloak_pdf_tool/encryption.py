@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 
+from .form_state import save_document
 from .redact import _save_encrypted, open_pdf
 
 
@@ -46,7 +47,7 @@ def decrypt_pdf(pdf_bytes: bytes, password: str) -> tuple[bytes, int]:
                     "Authentication failed: the supplied password is incorrect."
                 )
         buf = io.BytesIO()
-        doc.save(buf, garbage=4, deflate=True, clean=True)
+        buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
         return buf.getvalue(), len(doc)
     finally:
         doc.close()

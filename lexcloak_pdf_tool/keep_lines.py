@@ -53,6 +53,7 @@ from collections import Counter
 
 import pymupdf as _pymupdf
 
+from .form_state import apply_page_redactions
 from .redact import Rect
 from .remove_text import _unpaired
 from .trace import _every_layer_drawn, _key
@@ -185,7 +186,7 @@ def plan(doc, pno: int, rects: list) -> tuple[Counter, list] | None:
 def _remove_text(page, rects) -> None:
     for r in rects:
         page.add_redact_annot(r, fill=False)
-    page.apply_redactions(images=_pymupdf.PDF_REDACT_IMAGE_NONE,
+    apply_page_redactions(page, images=_pymupdf.PDF_REDACT_IMAGE_NONE,
                           graphics=_pymupdf.PDF_REDACT_LINE_ART_NONE,
                           text=_pymupdf.PDF_REDACT_TEXT_REMOVE)
 
@@ -226,7 +227,7 @@ def burn_keeping_lines(doc, pno: int, boxes: list, add_annots) -> bool:
     if not floor_holds(doc, pno, strips + rects, kept):
         _remove_text(page, strips + rects)
     add_annots(page, boxes)
-    page.apply_redactions(images=_pymupdf.PDF_REDACT_IMAGE_PIXELS,
+    apply_page_redactions(page, images=_pymupdf.PDF_REDACT_IMAGE_PIXELS,
                           graphics=_pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
                           text=_pymupdf.PDF_REDACT_TEXT_NONE)
     return True
