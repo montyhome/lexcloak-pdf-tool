@@ -648,3 +648,57 @@ def test_a_document_whose_layers_cannot_be_read_is_unchecked_not_clear(monkeypat
     apply_redactions(pdf, [], unseen_sink=sink,
                      remove_images=[{"page": 0, "box": [60, 600, 108, 648]}])
     assert sink["removed"] == 0 and len(sink["skipped_remove"]) == 1
+
+
+# ── gaps the mutation check found ────────────────────────────────────────
+
+
+def test_an_image_mostly_inside_the_crop_box_is_partly_outside():
+    pdf = _image_at((60, 360, 108, 405), crop=(0, 0, 612, 400))
+    assert _states(pdf) == {"partly-outside": 1}
+
+
+def test_a_placement_outside_the_crop_box_elsewhere_does_not_count_as_shown():
+    """``xref_shown`` means a reader sees the object somewhere. A second
+    placement that is itself outside the crop box is not that."""
+    doc = pymupdf.open()
+    first = _page(doc)
+    xref = first.insert_image(pymupdf.Rect(60, 600, 108, 648), stream=_image())
+    first.set_cropbox(pymupdf.Rect(0, 0, 612, 400))
+    second = _page(doc)
+    second.insert_image(pymupdf.Rect(60, 600, 108, 648), xref=xref)
+    second.set_cropbox(pymupdf.Rect(0, 0, 612, 400))
+    unseen = list_unseen_images_pdf(_bytes(doc))["unseen"]
+    assert [(u["page"], u["xref_shown"]) for u in unseen] == [(0, False), (1, False)]
+
+
+def test_removal_skips_a_box_with_no_image_in_it():
+    pdf = _inline_outside_crop()
+    sink: dict = {}
+    apply_redactions(pdf, [], unseen_sink=sink,
+                     remove_images=[{"page": 0, "box": [300, 600, 340, 640]}])
+    assert sink["removed"] == 0 and len(sink["skipped_remove"]) == 1
+
+
+def _glyphless_props(doc, page):
+    target, prefix = _resources(doc, page)
+    doc.xref_set_key(target, prefix + "Properties",
+                     f"<</MC0 <</ActualText ({MARK})>>>>")
+
+
+def _glyphless_form(doc, page):
+    fx = doc.get_new_xref()
+    doc.update_object(fx, "<</Type/XObject/Subtype/Form/BBox[0 0 300 50]>>")
+    doc.update_stream(fx, f"/Span <</ActualText ({MARK})>> BDC EMC".encode(), new=True)
+    target, prefix = _resources(doc, page)
+    doc.xref_set_key(target, prefix + "XObject", f"<</Fm1 {fx} 0 R>>")
+
+
+def test_a_glyphless_tag_in_a_property_list_is_listed():
+    pdf = _tagged(b"/Span /MC0 BDC EMC", _glyphless_props)
+    assert _entries(pdf) == [(0, MARK, "", True)]
+
+
+def test_a_glyphless_tag_inside_a_form_xobject_is_listed():
+    pdf = _tagged(b"q 1 0 0 1 60 600 cm /Fm1 Do Q", _glyphless_form)
+    assert _entries(pdf) == [(0, MARK, "", True)]
