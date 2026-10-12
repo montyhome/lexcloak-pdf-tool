@@ -340,7 +340,17 @@ def save_document(doc, **kwargs) -> bytes:
     document is saved again with the same arguments but ``clean=False``, so
     nothing is filtered twice. A form that a page which cannot be restored
     also shows keeps its own content as MuPDF wrote it.
+
+    Both saves pass ``preserve_metadata=False``. With it on (PyMuPDF's
+    default), MuPDF puts ``Root/Metadata`` back into ``doc`` after writing,
+    taken from the newest xref section that has one, which is the source
+    file's own once ``del_xml_metadata`` has run, and taken before garbage
+    collection renumbered the XMP stream when it is kept. The bytes of that
+    save are right, but the next save of ``doc`` (the second save here, or
+    a later op on the same handle) wrote ``/Metadata`` as a reference to
+    whatever object then had the old number.
     """
+    kwargs = {**kwargs, "preserve_metadata": False}
     restore: set[int] = set()
     blocked: set[int] = set()
     if kwargs.get("clean"):
