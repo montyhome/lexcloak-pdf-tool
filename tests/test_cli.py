@@ -536,7 +536,7 @@ def test_startup_line_emitted_on_stderr():
     code, stderr = s.close()
     text = stderr.decode("utf-8", errors="replace")
     assert "lexcloak_pdf_tool starting" in text
-    assert "protocol_version=12" in text
+    assert "protocol_version=13" in text
     assert "pymupdf_version=" in text
 
 
@@ -582,7 +582,7 @@ def test_protocol_version_v1_rejected():
     assert resp["error_type"] == "ProtocolVersionMismatch"
 
 
-def test_protocol_version_v13_rejected():
+def test_protocol_version_v14_rejected():
     """Future versions outside the supported set are rejected.
 
     Was ``v5_rejected`` until 0.6.8 (`render_clip` + `list_annotations`),
@@ -591,17 +591,28 @@ def test_protocol_version_v13_rejected():
     ``v8_rejected`` until 0.9.0 (`residue_report`), ``v9_rejected``
     until 0.10.0 (`render_removed`) and ``v10_rejected`` until 0.12.0 (PDFs
     by path), ``v11_rejected`` until 0.13.0 (strings outside the page
-    content) and ``v12_rejected`` until 0.14.0 (content the page does not
-    show). The assertion it encodes -- "a version
+    content), ``v12_rejected`` until 0.14.0 (content the page does not
+    show) and ``v13_rejected`` until 0.15.0 (page labels on a split part).
+    The assertion it encodes -- "a version
     we do not know is refused, not ignored" -- is what matters, so it moves
     to the next unsupported number rather than being deleted.
     """
     with CLISession() as s:
-        s.write_frame({"protocol_version": 13, "op": "page_count",
+        s.write_frame({"protocol_version": 14, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf())})
         resp = s.read_frame()
     assert resp["ok"] is False
     assert resp["error_type"] == "ProtocolVersionMismatch"
+
+
+def test_protocol_version_v13_now_accepted():
+    """v13 is the version whose split ops take ``first_page_label`` (0.15.0)."""
+    with CLISession() as s:
+        resp = s.call("extract_pages", protocol_version=13,
+                      pdf_b64=_b64(_make_pdf(n_pages=2)), from_page=0,
+                      to_page=1, first_page_label=7)
+    assert resp["ok"] is True
+    assert resp["result"]["page_count"] == 2
 
 
 def test_protocol_version_v11_now_accepted():

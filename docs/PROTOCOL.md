@@ -1,9 +1,9 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.14.2 ships
-protocol version 12.** Every earlier version from 2 stays in the supported
-set ({2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) so a current subprocess serves older clients
+parent via length-prefixed JSON frames over stdin/stdout. **v0.15.0 ships
+protocol version 13.** Every earlier version from 2 stays in the supported
+set ({2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}) so a current subprocess serves older clients
 cleanly during rolling client upgrades. The table under **Versioning**
 records what each version added.
 
@@ -768,10 +768,22 @@ still forms a legal outline. Output is saved `garbage=3, deflate=True`.
 | `pdf_b64` | base64 string | required |
 | `from_page` | int (0-based) | `0` |
 | `to_page` | int (0-based, inclusive) | required in practice (`-1` fails validation) |
+| `first_page_label` *(v13+)* | int ≥ 1, or absent/`null` | absent |
 
 **Result:** `{"pdf_b64": str, "page_count": int}`.
 
-An out-of-range or inverted range returns `error_type: "ValueError"`.
+`first_page_label` sets the part's page labels, the numbers a viewer shows
+for each page, separate from its position in the file: one decimal range
+from the part's first page, starting at the given number and carrying no
+prefix (`/PageLabels << /Nums [0 << /S /D /St n >>] >>`). So a part cut
+from pages 93–180 of a source, given `93`, reads 93 to 180 in a viewer. The
+part never carries the source's own labels, with or without the field
+(`insert_pdf` copies pages, not the catalog). Without the field the output is
+byte-identical to 0.14.2's, the trailer `/ID` aside.
+
+An out-of-range or inverted range returns `error_type: "ValueError"`, as
+does a `first_page_label` that is not an integer of at least 1 (`0`, a
+negative, a string, a float or a boolean).
 `extract_pages_h` is the handle variant; it is read-only against the
 cached document (never mutates or closes it).
 
@@ -1049,3 +1061,4 @@ shipping client has caught up.
 | 0.14.0 | **12** | Adds `list_unseen_images` (+ `_h`): image placements the page as it opens never shows, drawn wholly outside the crop box or only in switched-off optional content, each with the object it draws and whether that object is shown anywhere else; and `list_tag_text` (+ `_h`): where text extraction returns letters or digits that differ from the glyphs drawn, `/ActualText` in page content, forms and property lists, including tags that wrap no glyphs. `apply_redactions` (+ `_h`) gains `blank_images`, `remove_images` and `strip_tags_pages`, answering `"unseen_images"` when either image field was sent; `extract_text_plain` (+ `_h`) gains `drawn_only`. Without the fields every burn and read is unchanged. The supported set widens to {2, ..., 12}. |
 | 0.14.1 | 12 | No new ops, no wire-surface change. A form XObject keeps the text state it draws with through every op that rewrites page content: `apply_redactions` (+ `_h`, including `remove_text` and `keep_uncovered_lines`) and every op that saves with `clean=True`. MuPDF's content filter (pymupdf 1.28.2) writes pending text state (`Tc Tw Tz Tr Ts`) only inside `BT`, so a value set between `ET` and a form's `Do` was dropped, and it filters each form as if it started from the default text state, so a form's own default-valued setting was dropped too. A page that draws invisible text (`3 Tr`) and then a visible stamp in a form that resets `0 Tr` therefore lost the stamp: still in the file, drawing nothing, after any redaction on the page or any clean save of the document. And `remove_text`, which verifies each removal on a copy, saw the stamp disappear and kept every word on such a page rather than harm it. Each filtered form's `Do` is now wrapped in the default text state the filter assumed (`q 0 Tc 0 Tw 100 Tz 0 Tr 0 Ts ... Do Q`). A page whose forms show text with inherited non-default state, or whose content cannot be read, is left exactly as MuPDF writes it, and a document no page of which sets a non-default text state saves as before. `remove_text`'s verify reads character keys only, which leaves its outcome unchanged and cuts its cost. `PROTOCOL_VERSION` stays 12. |
 | 0.14.2 | 12 | No new ops, no wire-surface change. A saved PDF's catalog `/Metadata` names the XMP stream or is absent; it no longer names an unrelated object. PyMuPDF saves with `preserve_metadata=1` by default, and MuPDF then puts `Root/Metadata` back into the open document after writing: from the newest xref section that has one, which once `del_xml_metadata` has run is the source file's own, and as the reference it held before garbage collection renumbered the objects. That save's bytes were right, but the next save of the same open document wrote the stale reference. 0.14.1's form text-state repair saves twice when a page needs restoring, so on such a document `strip_metadata`, `apply_redactions` (+ `_h`), `set_metadata`, `reduce_size`, the cover page and the encrypted save wrote `/Metadata` pointing at another object (a page dictionary, say) whether the XMP had been removed or kept; and a handle-held document saved by two ops in turn met the same with no form at all. No document text or XMP survived, but the file was structurally wrong and PyMuPDF's `get_xml_metadata()` raised on it. Every save `save_document` makes now passes `preserve_metadata=False`; a single save's bytes are unchanged by it. `PROTOCOL_VERSION` stays 12. |
+| 0.15.0 | **13** | Adds the optional `first_page_label` field on `extract_pages` (+ `_h`): the part's page labels count up from it in plain decimal with no prefix, so a part keeps showing the page numbers it had in its source. Without the field every part is byte-identical to 0.14.2's (trailer `/ID` aside). A bad value (not an integer of at least 1) is a `ValueError`. Bumps the protocol because an older subprocess ignores an unknown field and would return a part with no labels and no error; advertising 13 lets a client send the field only to a subprocess that writes it. The supported set widens to {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}. |

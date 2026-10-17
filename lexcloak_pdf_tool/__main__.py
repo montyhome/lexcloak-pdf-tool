@@ -70,7 +70,9 @@ from lexcloak_pdf_tool import (
 from lexcloak_pdf_tool.coords import deserialize_chardata, serialize_chardata
 from lexcloak_pdf_tool.cover_page import _insert_cover_page_doc
 from lexcloak_pdf_tool.form_state import save_document
-from lexcloak_pdf_tool.page_split import extract_pages, extract_pages_from_doc
+from lexcloak_pdf_tool.page_split import (
+    extract_pages, extract_pages_from_doc, validate_first_page_label,
+)
 # Doc-variant helpers for the v4 stateful handle protocol. These take an
 # already-open ``pymupdf.Document`` and reuse the same body as the bytes
 # wrappers (which open + close per call). Underscore-prefixed because the
@@ -195,11 +197,13 @@ _pymupdf.set_messages(stream=sys.stderr)
 # extraction's text differs from the glyphs drawn), the optional
 # ``blank_images``, ``remove_images`` and ``strip_tags_pages`` fields on both apply_redactions
 # ops, and ``drawn_only`` on both extract_text_plain ops.
+# v13 (0.15.0) adds the optional ``first_page_label`` field on both
+# extract_pages ops: the part's page labels count up from it.
 # Older versions stay supported so a newer
 # subprocess can still serve older clients cleanly; once every shipping
 # client speaks v4+, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 12
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+PROTOCOL_VERSION = 13
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
@@ -682,12 +686,21 @@ def _op_reduce_size(cmd: dict) -> dict:
     }
 
 
+def _first_page_label(cmd: dict) -> int | None:
+    """v13: the optional ``first_page_label`` field, validated before any work."""
+    return validate_first_page_label(cmd.get("first_page_label"))
+
+
 def _op_extract_pages(cmd: dict) -> dict:
-    """v6: one contiguous page range as a standalone PDF (see page_split)."""
+    """v6: one contiguous page range as a standalone PDF (see page_split).
+
+    v13: optional ``first_page_label`` (an integer of at least 1).
+    """
     pdf_bytes = _decode_pdf(cmd)
     from_page = int(cmd.get("from_page", 0))
     to_page = int(cmd.get("to_page", -1))
-    out_bytes = extract_pages(pdf_bytes, from_page, to_page)
+    out_bytes = extract_pages(pdf_bytes, from_page, to_page,
+                              _first_page_label(cmd))
     return {
         **_pdf_result(cmd, out_bytes),
         "page_count": to_page - from_page + 1,
@@ -1185,7 +1198,8 @@ def _op_extract_pages_h(cmd: dict) -> dict:
     doc = _resolve_handle(_get_handle(cmd))
     from_page = int(cmd.get("from_page", 0))
     to_page = int(cmd.get("to_page", -1))
-    out_bytes = extract_pages_from_doc(doc, from_page, to_page)
+    out_bytes = extract_pages_from_doc(doc, from_page, to_page,
+                                       _first_page_label(cmd))
     return {
         **_pdf_result(cmd, out_bytes),
         "page_count": to_page - from_page + 1,

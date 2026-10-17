@@ -11,6 +11,13 @@ deflate=True`` pass.
 Page numbers here are 0-based and the range is INCLUSIVE on both ends,
 matching every other per-page op in this package. Callers presenting
 ranges to humans are expected to convert to 1-based themselves.
+
+v13 (0.15.0) adds an optional ``first_page_label``: the part's page labels
+(the numbers a viewer shows, separate from a page's position in the file)
+become plain decimal numbers starting there, so the part's pages can read
+"93, 94, ..." where they sat in the source. The labels carry no prefix, so
+they hold no text. Without it the part carries no labels, as before:
+``insert_pdf`` copies pages, not the source catalog's ``/PageLabels``.
 """
 from __future__ import annotations
 
@@ -46,13 +53,31 @@ def _rebase_toc(toc: list, from_page: int, to_page: int) -> list:
     return sliced
 
 
+def validate_first_page_label(value) -> int | None:
+    """``None`` (absent) or an integer of at least 1; anything else raises.
+
+    ``bool`` is refused although it is an ``int`` subclass: ``True`` is not a
+    page number. A float, even a whole one, is refused rather than truncated.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("first_page_label must be an integer of at least 1")
+    if value < 1:
+        raise ValueError("first_page_label must be an integer of at least 1")
+    return value
+
+
 def extract_pages_from_doc(src: "pymupdf.Document", from_page: int,
-                           to_page: int) -> bytes:
+                           to_page: int,
+                           first_page_label: int | None = None) -> bytes:
     """The document-object core — shared by the bytes and handle ops.
 
     Never closes ``src`` (the handle op's cached document must survive).
-    Raises ``ValueError`` on an out-of-range or inverted page range.
+    Raises ``ValueError`` on an out-of-range or inverted page range, or a
+    ``first_page_label`` that is not an integer of at least 1.
     """
+    first_page_label = validate_first_page_label(first_page_label)
     n = src.page_count
     if not (0 <= from_page <= to_page < n):
         raise ValueError(
@@ -65,15 +90,22 @@ def extract_pages_from_doc(src: "pymupdf.Document", from_page: int,
         sliced = _rebase_toc(src.get_toc(simple=True), from_page, to_page)
         if sliced:
             out.set_toc(sliced)
+        if first_page_label is not None:
+            # One decimal range from the part's first page, no ``/P``.
+            out.set_page_labels([{"startpage": 0, "prefix": "", "style": "D",
+                                  "firstpagenum": first_page_label}])
         return out.tobytes(garbage=3, deflate=True)
     finally:
         out.close()
 
 
-def extract_pages(pdf_bytes: bytes, from_page: int, to_page: int) -> bytes:
+def extract_pages(pdf_bytes: bytes, from_page: int, to_page: int,
+                  first_page_label: int | None = None) -> bytes:
     """Extract an inclusive 0-based page range as a standalone PDF."""
+    first_page_label = validate_first_page_label(first_page_label)
     src = pymupdf.open(stream=pdf_bytes, filetype="pdf")
     try:
-        return extract_pages_from_doc(src, from_page, to_page)
+        return extract_pages_from_doc(src, from_page, to_page,
+                                      first_page_label)
     finally:
         src.close()
