@@ -571,7 +571,7 @@ def _cmd(op: str, **kw) -> dict:
 
 
 def test_protocol_12_carries_the_new_ops():
-    assert PROTOCOL_VERSION == 12
+    assert PROTOCOL_VERSION >= 12
     for op in ("list_unseen_images", "list_unseen_images_h",
                "list_tag_text", "list_tag_text_h"):
         assert op in _OPS

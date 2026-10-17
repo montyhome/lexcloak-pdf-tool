@@ -8,6 +8,7 @@ leaves its handle usable, and a bad range surfaces as ``ValueError``.
 from __future__ import annotations
 
 import base64
+import re
 
 import pymupdf
 import pytest
@@ -161,3 +162,170 @@ class TestExtractPagesCLI:
                           from_page=2, to_page=9)
             assert resp["ok"] is False
             assert resp["error_type"] == "ValueError"
+
+
+# ── first_page_label (v13, 0.15.0) ──────────────────────────────────
+
+#: A trailer ``/ID`` half is a hex string or a literal string, whichever
+#: MuPDF found shorter for that save's random bytes; mask both shapes, half
+#: by half (a literal may hold an unescaped ``]``).
+_ID_HALF = rb"(?:<[0-9A-Fa-f]*>|\((?:\\[\s\S]|[^\\()])*\))"
+_ID_RE = re.compile(rb"/ID\s*\[\s*" + _ID_HALF + rb"\s*" + _ID_HALF + rb"\s*\]")
+
+
+def _mask_id(pdf_bytes: bytes) -> bytes:
+    return _ID_RE.sub(b"/ID[<masked>]", pdf_bytes)
+
+
+def _labels(pdf_bytes: bytes) -> tuple[list[dict], list[str]]:
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        return doc.get_page_labels(), [p.get_label() for p in doc]
+    finally:
+        doc.close()
+
+
+def _labelled_pdf() -> bytes:
+    """Six pages labelled ``A-1 A-2 A-3 B-i B-ii B-iii``."""
+    doc = pymupdf.open()
+    for i in range(6):
+        doc.new_page(width=612, height=792).insert_text(
+            pymupdf.Point(72, 100), f"PAGE-{i}")
+    doc.set_page_labels([
+        {"startpage": 0, "prefix": "A-", "style": "D", "firstpagenum": 1},
+        {"startpage": 3, "prefix": "B-", "style": "r", "firstpagenum": 1},
+    ])
+    out = doc.tobytes()
+    doc.close()
+    return out
+
+
+class TestFirstPageLabel:
+    def test_labels_count_up_from_the_given_number(self):
+        part = extract_pages(_numbered_pdf(10), 4, 6, first_page_label=93)
+        rules, labels = _labels(part)
+        assert rules == [{"startpage": 0, "prefix": "", "firstpagenum": 93,
+                          "style": "D"}]
+        assert labels == ["93", "94", "95"]
+        assert _page_texts(part) == ["PAGE-4", "PAGE-5", "PAGE-6"]
+
+    def test_label_one_for_a_first_part(self):
+        _, labels = _labels(extract_pages(_numbered_pdf(4), 0, 1,
+                                          first_page_label=1))
+        assert labels == ["1", "2"]
+
+    def test_one_page_part(self):
+        _, labels = _labels(extract_pages(_numbered_pdf(10), 7, 7,
+                                          first_page_label=8))
+        assert labels == ["8"]
+
+    def test_part_ending_on_the_last_page(self):
+        _, labels = _labels(extract_pages(_numbered_pdf(10), 7, 9,
+                                          first_page_label=8))
+        assert labels == ["8", "9", "10"]
+
+    def test_a_2000_page_source(self):
+        doc = pymupdf.open()
+        for _ in range(2000):
+            doc.new_page(width=100, height=100)
+        src = doc.tobytes()
+        doc.close()
+        _, labels = _labels(extract_pages(src, 1499, 1999,
+                                          first_page_label=1500))
+        assert len(labels) == 501
+        assert labels[0] == "1500"
+        assert labels[-1] == "2000"
+
+    def test_the_labels_carry_no_prefix_string(self):
+        part = extract_pages(_numbered_pdf(5), 1, 3, first_page_label=2)
+        doc = pymupdf.open(stream=part, filetype="pdf")
+        kind, value = doc.xref_get_key(doc.pdf_catalog(), "PageLabels")
+        doc.close()
+        assert (kind, value) == ("dict", "<</Nums[0<</S/D/St 2>>]>>")
+
+    def test_source_labels_are_replaced_and_their_prefixes_gone(self):
+        part = extract_pages(_labelled_pdf(), 2, 4, first_page_label=3)
+        rules, labels = _labels(part)
+        assert labels == ["3", "4", "5"]
+        assert len(rules) == 1
+        assert b"A-" not in part and b"B-" not in part
+
+    def test_without_the_field_a_labelled_source_gives_no_labels(self):
+        rules, labels = _labels(extract_pages(_labelled_pdf(), 2, 4))
+        assert rules == []
+        assert labels == ["", "", ""]
+
+    def test_absent_is_the_historical_output(self):
+        src = _numbered_pdf(10)
+        absent = extract_pages(src, 3, 6)
+        explicit_none = extract_pages(src, 3, 6, first_page_label=None)
+        assert b"PageLabels" not in absent
+        assert _mask_id(absent) == _mask_id(explicit_none)
+
+    @pytest.mark.parametrize("bad", [0, -5, "93", 93.0, 1.5, True, [1]])
+    def test_bad_values_raise_value_error(self, bad):
+        with pytest.raises(ValueError, match="first_page_label"):
+            extract_pages(_numbered_pdf(3), 0, 1, first_page_label=bad)
+
+    def test_document_core_validates_too(self):
+        doc = pymupdf.open(stream=_numbered_pdf(3), filetype="pdf")
+        try:
+            with pytest.raises(ValueError, match="first_page_label"):
+                extract_pages_from_doc(doc, 0, 1, first_page_label=0)
+        finally:
+            doc.close()
+
+
+class TestFirstPageLabelCLI:
+    def test_stateless_op_writes_labels(self):
+        with CLISession() as s:
+            resp = s.call("extract_pages",
+                          pdf_b64=base64.b64encode(
+                              _numbered_pdf(10)).decode(),
+                          from_page=2, to_page=4, first_page_label=3)
+            assert resp["ok"] is True
+            part = base64.b64decode(resp["result"]["pdf_b64"])
+        assert _labels(part)[1] == ["3", "4", "5"]
+
+    def test_handle_op_writes_labels_and_keeps_the_handle(self):
+        with CLISession() as s:
+            opened = s.call("open_doc",
+                            pdf_b64=base64.b64encode(
+                                _labelled_pdf()).decode())
+            handle = opened["result"]["handle"]
+            resp = s.call("extract_pages_h", handle=handle,
+                          from_page=3, to_page=5, first_page_label=4)
+            assert resp["ok"] is True
+            part = base64.b64decode(resp["result"]["pdf_b64"])
+            # The cached source keeps its own labels.
+            again = s.call("extract_pages_h", handle=handle,
+                           from_page=0, to_page=5)
+            assert again["ok"] is True
+        assert _labels(part)[1] == ["4", "5", "6"]
+
+    @pytest.mark.parametrize("op", ["extract_pages", "extract_pages_h"])
+    @pytest.mark.parametrize("bad", [0, -1, "93", 93.5, True])
+    def test_bad_values_report_value_error(self, op, bad):
+        with CLISession() as s:
+            if op == "extract_pages":
+                resp = s.call(op, pdf_b64=base64.b64encode(
+                    _numbered_pdf(3)).decode(), from_page=0, to_page=1,
+                    first_page_label=bad)
+            else:
+                handle = s.call("open_doc", pdf_b64=base64.b64encode(
+                    _numbered_pdf(3)).decode())["result"]["handle"]
+                resp = s.call(op, handle=handle, from_page=0, to_page=1,
+                              first_page_label=bad)
+            assert resp["ok"] is False
+            assert resp["error_type"] == "ValueError"
+            assert "first_page_label" in resp["error"]
+
+    def test_null_field_is_absent(self):
+        with CLISession() as s:
+            resp = s.call("extract_pages",
+                          pdf_b64=base64.b64encode(
+                              _numbered_pdf(4)).decode(),
+                          from_page=0, to_page=1, first_page_label=None)
+            assert resp["ok"] is True
+            part = base64.b64decode(resp["result"]["pdf_b64"])
+        assert _labels(part)[0] == []
