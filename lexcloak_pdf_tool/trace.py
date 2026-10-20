@@ -1,4 +1,4 @@
-"""Per-word text trace with drawing properties (protocol v7, v9).
+"""Per-word text trace with drawing properties (protocol v7, v9; words narrowed in 0.15.1).
 
 ``page.get_text()`` answers "what text is on this page?" and deliberately
 leaves out text that is not drawn: it clips to the page, skips content in
@@ -6,6 +6,14 @@ optional-content groups that are switched off, and skips glyphs removed by a
 clipping path. This op answers the opposite question -- "what text does this
 page's content carry, and how is each word drawn?" -- so a caller can compare
 it with a render of the page.
+
+A word is a run of non-space characters of one text span. It ends at
+whitespace and, since 0.15.1, wherever the next character does not continue
+the one before it: a gap along the line, a jump back, or another baseline
+(``GAP_EM``, ``BACK_EM``, ``BASELINE_EM``). A span runs on through all three,
+so a word that ended only at spaces could cover two runs and the gap
+between them, and a caller comparing its box with a render would read one
+run's ink for both.
 
 Each word carries only facts read from the PDF's own drawing instructions:
 
@@ -109,18 +117,69 @@ def _drawn_chars(page) -> set:
     return out
 
 
+#: A word also ends between two glyphs of one span that do not continue each
+#: other (v0.15.1), measured in ems of the span's size: a gap along the line
+#: of at least ``GAP_EM`` (where MuPDF's own word extraction splits), a jump
+#: back of more than ``BACK_EM`` (further than kerning pulls), or a move to
+#: another baseline of more than ``BASELINE_EM`` (further than a superscript
+#: rises). A span runs on through a ``TJ`` gap, a ``Td`` to the next line and
+#: a ``Td`` backwards, so without this one "word" could span all of them.
+GAP_EM = 0.15
+BACK_EM = 0.25
+BASELINE_EM = 0.5
+
+
+def _advance(box, size: float, ux: float, uy: float) -> float:
+    """A glyph's extent along the line direction ``(ux, uy)``.
+
+    The trace's glyph box is the glyph's advance by one em, turned with the
+    text and bounded upright, so the advance is recovered from whichever of
+    the box's sides the line runs closer to. On upright text it is the
+    box's width."""
+    w, h = box[2] - box[0], box[3] - box[1]
+    ax, ay = abs(ux), abs(uy)
+    adv = (w - size * ay) / ax if ax >= ay else (h - size * ax) / ay
+    return max(0.0, adv)
+
+
+def _breaks(prev, ch, size: float, u: tuple[float, float]) -> bool:
+    """Whether glyph ``ch`` starts a new word after glyph ``prev``."""
+    ux, uy = u
+    dx, dy = ch[2][0] - prev[2][0], ch[2][1] - prev[2][1]
+    if abs(dy * ux - dx * uy) > BASELINE_EM * size:
+        return True
+    along = dx * ux + dy * uy - _advance(prev[3], size, ux, uy)
+    return along >= GAP_EM * size or along < -BACK_EM * size
+
+
+def _line_dir(span) -> tuple[float, float] | None:
+    """The span's unit line direction, or None where gaps are not read:
+    vertical writing (its glyphs advance across ``dir``), or no size."""
+    if span.get("wmode") or float(span.get("size") or 0.0) <= 0.0:
+        return None
+    ux, uy = span.get("dir") or (1.0, 0.0)
+    norm = (ux * ux + uy * uy) ** 0.5
+    return (ux / norm, uy / norm) if norm else None
+
+
 def _span_words(span) -> list[tuple[str, tuple, list, list]]:
-    """``(text, unrotated bbox, [char keys], [char boxes])`` per
-    space-separated word. Keys and boxes run in the order of ``text``."""
+    """``(text, unrotated bbox, [char keys], [char boxes])`` per word. A word
+    ends at whitespace and wherever the next glyph does not continue the one
+    before it (``_breaks``). Keys and boxes run in the order of ``text``."""
     words, buf, box, keys, boxes = [], [], None, [], []
+    u = _line_dir(span)
+    size = float(span.get("size") or 0.0)
+    prev = None
     for ch in span.get("chars", ()):
         c = chr(ch[0])
         x0, y0, x1, y1 = ch[3]
-        if c.isspace():
-            if buf:
-                words.append(("".join(buf), box, keys, boxes))
+        space = c.isspace()
+        if buf and (space or (u is not None and _breaks(prev, ch, size, u))):
+            words.append(("".join(buf), box, keys, boxes))
             buf, box, keys, boxes = [], None, [], []
+        if space:
             continue
+        prev = ch
         buf.append(c)
         keys.append(_key(c, ch[2]))
         boxes.append((x0, y0, x1, y1))
