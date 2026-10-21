@@ -282,8 +282,10 @@ def test_an_offset_media_box_is_measured_from_the_clipped_corner():
                                   "[611.5 100 700 700]", "[50 100 400 100]"],
                          ids=["misses", "touches", "half-a-point", "no-height"])
 def test_a_page_that_shows_nothing_has_every_placement_outside_crop(crop):
-    """MuPDF draws nothing on these pages, and PDFium's page has no area:
-    nothing a reader sees, so nothing that is drawn is shown."""
+    """MuPDF draws nothing on any of these pages, and PDFium gives a page
+    whose crop box misses its media box no area. PDFium shows the media box
+    for a crop box with no height; read as nothing shown, the image is
+    blanked rather than shipped unseen in the view MuPDF gives."""
     pdf, (xref,) = _boxed([[(100, 400, 140, 430), (0, 0, 612, 792)]], crop=crop)
     listing = list_unseen_images_pdf(pdf)
     assert listing["counts"] == _counts(outside_crop=2)
