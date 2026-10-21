@@ -81,7 +81,6 @@ BOX_TOL_PT = 0.5
 
 #: US Letter: the page MuPDF and PDFium lay out when a page has no media box.
 _LETTER = (0.0, 0.0, 612.0, 792.0)
-_NO_BOX = (float("inf"), float("inf"), float("-inf"), float("-inf"))
 
 IMAGE_STATES = ("shown", "partly-outside", "outside-crop", "off-layer")
 UNSEEN_STATES = ("outside-crop", "off-layer")
@@ -174,18 +173,14 @@ def _crop(page) -> tuple | None:
     """
     obj = _m.pdf_load_object(_m.pdf_specifics(page.parent.this), page.xref)
     media, crop = _page_box(obj, "MediaBox"), _page_box(obj, "CropBox")
-    # MuPDF's layout box (``pdf_page_obj_transform_box``).
-    laid = media or _NO_BOX
-    if crop is not None:
-        laid = _meet(laid, crop)
-    if _empty(laid):
-        laid = _LETTER
-    elif _under_a_point(laid):
-        laid = (0.0, 0.0, 1.0, 1.0)
     paper = media if media is not None and not _empty(media) else _LETTER
     shown = paper if crop is None else _meet(paper, crop)
     if _under_a_point(shown):
         return None
+    # MuPDF lays the page out on the crop box clipped to the media box as it
+    # reads them, which with no usable media box is empty, and then on US
+    # Letter (``pdf_page_obj_transform_box``).
+    laid = shown if paper is media else _LETTER
     unit = _m.pdf_dict_get_real_default(obj, _m.pdf_new_name("UserUnit"), 1.0)
     return (unit * (shown[0] - laid[0]) - EDGE_TOL_PT,
             unit * (laid[3] - shown[3]) - EDGE_TOL_PT,

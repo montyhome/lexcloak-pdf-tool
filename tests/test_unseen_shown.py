@@ -239,14 +239,32 @@ def test_no_crop_box_shows_the_media_box():
                        "counts": _counts(shown=1, outside_crop=1), "unreadable_pages": []}
 
 
-def test_a_crop_box_with_no_media_box_is_clipped_to_us_letter():
-    """No media box reads as US Letter; the page shows the crop box within it.
-    MuPDF lays the page out on all of Letter, so boxes are measured from
-    Letter's top-left corner."""
-    listing, (xref,) = _listing([[(100, 400, 140, 430), (100, 30, 140, 60)]],
-                                crop="[50 100 400 700]", media=None)
+@pytest.mark.parametrize("media", [None, "[0 0 0 0]", "[0 0 612 0]", "7"],
+                         ids=["none", "no-area", "no-height", "not-an-array"])
+def test_a_crop_box_with_no_usable_media_box_is_clipped_to_us_letter(media):
+    """No media box, or one with no area, reads as US Letter; the page shows
+    the crop box within it. MuPDF lays the page out on all of Letter, so
+    boxes are measured from Letter's top-left corner: the last image sits
+    just inside the crop box's top edge, 92 points below Letter's."""
+    listing, (xref,) = _listing(
+        [[(100, 400, 140, 430), (100, 30, 140, 60), (100, 694, 140, 699)]],
+        crop="[50 100 400 700]", media=media)
     assert listing == {"unseen": [_outside([100.0, 732.0, 140.0, 762.0], xref, shown=True)],
+                       "counts": _counts(shown=2, outside_crop=1), "unreadable_pages": []}
+
+
+def test_no_usable_media_box_and_no_crop_box_shows_us_letter():
+    listing, (xref,) = _listing([[(100, 400, 140, 430), (650, 400, 690, 430)]],
+                                media="[0 0 0 0]")
+    assert listing == {"unseen": [_outside([650.0, 362.0, 690.0, 392.0], xref, shown=True)],
                        "counts": _counts(shown=1, outside_crop=1), "unreadable_pages": []}
+
+
+@pytest.mark.parametrize("crop", ["5", "/None"])
+def test_a_crop_box_that_is_not_an_array_reads_as_none(crop):
+    """MuPDF and PDFium both show the media box then."""
+    listing, _ = _listing([[(100, 400, 140, 430), (100, 30, 140, 60)]], crop=crop)
+    assert listing == {"unseen": [], "counts": _counts(shown=2), "unreadable_pages": []}
 
 
 def test_an_offset_media_box_is_measured_from_the_clipped_corner():
@@ -540,6 +558,57 @@ def test_a_tag_around_an_image_inside_a_nested_form_is_listed():
     inner = b"/Span <</ActualText (" + MARK.encode() + b")>> BDC q 48 0 0 48 60 300 cm /Im Do Q EMC"
     pdf = _tag_page(b"/Outer Do", _forms(inner))
     assert list_tag_text_pdf(pdf) == {"entries": [_glyphless()], "unreadable_pages": []}
+
+
+def test_an_empty_string_shown_inside_the_tag_is_no_glyph():
+    body = _around(b"BT /helv 12 Tf 60 150 Td () Tj [<>] TJ ET " + IMG)
+    assert list_tag_text_pdf(_tag_page(body)) == {
+        "entries": [_glyphless()], "unreadable_pages": []}
+
+
+def test_marked_content_inside_a_tag_closes_only_itself():
+    """``BMC ... EMC`` inside the tag ends there; the glyphs after it are
+    still the tag's, so the tag wraps glyphs."""
+    body = (b"BT /helv 12 Tf 60 150 Td "
+            + _around(b"/Artifact BMC EMC /P <</MCID 0>> BDC EMC (visible words) Tj")
+            + b" ET " + IMG)
+    assert _entries(_tag_page(body)) == [(0, MARK, "visible words", False)]
+
+
+def test_a_tag_around_a_tag_around_glyphs_wraps_them_too():
+    """Both tags repeat the glyphs, so neither says anything the page does
+    not draw; the outer one wraps glyphs through the inner one."""
+    inner = _around(b"(visible words) Tj", "visible words")
+    body = (b"BT /helv 12 Tf 60 150 Td " + _around(inner, "visible words") + b" ET "
+            + IMG)
+    assert list_tag_text_pdf(_tag_page(body)) == {"entries": [], "unreadable_pages": []}
+
+
+def test_a_tag_the_content_never_closes_is_read_to_its_end():
+    body = b"/Span <</ActualText (" + MARK.encode() + b")>> BDC " + IMG
+    assert list_tag_text_pdf(_tag_page(body)) == {
+        "entries": [_glyphless()], "unreadable_pages": []}
+
+
+def test_a_form_without_resources_draws_with_its_callers():
+    """``/Bare`` has no ``/Resources``, so the ``/Words`` it draws is the
+    page's: the tag around it wraps glyphs."""
+    def bare(doc, page):
+        kind, val = doc.xref_get_key(page.xref, "Resources")
+        target, prefix = (int(val.split()[0]), "") if kind == "xref" else (page.xref, "Resources/")
+        image = doc.xref_get_key(target, prefix + "XObject")[1]
+        words = doc.get_new_xref()
+        doc.update_object(words, "<</Type/XObject/Subtype/Form/BBox[0 0 612 792]"
+                                 "/Resources<</Font<</F1<</Type/Font/Subtype/Type1"
+                                 "/BaseFont/Helvetica>>>>>>>>")
+        doc.update_stream(words, b"BT /F1 12 Tf 60 150 Td (visible words) Tj ET", new=True)
+        fx = doc.get_new_xref()
+        doc.update_object(fx, "<</Type/XObject/Subtype/Form/BBox[0 0 612 792]>>")
+        doc.update_stream(fx, b"/Words Do", new=True)
+        doc.xref_set_key(target, prefix + "XObject",
+                         image[:-2] + f"/Bare {fx} 0 R/Words {words} 0 R>>")
+    assert _entries(_tag_page(_around(b"/Bare Do"), bare)) == [
+        (0, MARK, "visible words", False)]
 
 
 def test_a_form_that_draws_itself_is_read_once():
