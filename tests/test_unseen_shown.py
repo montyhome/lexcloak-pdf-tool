@@ -244,13 +244,16 @@ def test_no_crop_box_shows_the_media_box():
 def test_a_crop_box_with_no_usable_media_box_is_clipped_to_us_letter(media):
     """No media box, or one with no area, reads as US Letter; the page shows
     the crop box within it. MuPDF lays the page out on all of Letter, so
-    boxes are measured from Letter's top-left corner: the last image sits
-    just inside the crop box's top edge, 92 points below Letter's."""
+    boxes are measured from Letter's top-left corner: one image sits just
+    inside the crop box's top edge, 92 points below Letter's, and the last
+    one left of the crop box, on Letter."""
     listing, (xref,) = _listing(
-        [[(100, 400, 140, 430), (100, 30, 140, 60), (100, 694, 140, 699)]],
+        [[(100, 400, 140, 430), (100, 30, 140, 60), (100, 694, 140, 699),
+          (10, 400, 40, 430)]],
         crop="[50 100 400 700]", media=media)
-    assert listing == {"unseen": [_outside([100.0, 732.0, 140.0, 762.0], xref, shown=True)],
-                       "counts": _counts(shown=2, outside_crop=1), "unreadable_pages": []}
+    assert listing == {"unseen": [_outside([100.0, 732.0, 140.0, 762.0], xref, shown=True),
+                                  _outside([10.0, 362.0, 40.0, 392.0], xref, shown=True)],
+                       "counts": _counts(shown=2, outside_crop=2), "unreadable_pages": []}
 
 
 def test_no_usable_media_box_and_no_crop_box_shows_us_letter():
