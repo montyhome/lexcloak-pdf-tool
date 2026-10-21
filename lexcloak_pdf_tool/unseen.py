@@ -1,4 +1,5 @@
-"""Content a PDF carries that the page, as it opens, does not show (v0.14.0).
+"""Content a PDF carries that the page, as it opens, does not show (v0.14.0;
+both listings read what the page shows since v0.15.2).
 
 Two kinds, each listed for a caller to judge and changed only where the
 caller names it. Nothing here decides what content means.
@@ -6,11 +7,17 @@ caller names it. Nothing here decides what content means.
 **Images.** :func:`list_unseen_images` reads every image placement and
 reports the ones the page as it opens never shows:
 
-* ``outside-crop`` -- drawn wholly outside the crop box, so no viewer shows it;
+* ``outside-crop`` -- drawn wholly outside the area the page shows, so no
+  viewer shows it;
 * ``off-layer`` -- drawn only in optional content the document switches off.
 
+The area a page shows is its crop box clipped to its media box (no crop box:
+the media box; no media box, or one with no area: US Letter). An area under a
+point wide or high shows nothing, so every placement on that page is
+``outside-crop``.
+
 It also counts every placement by state, the shown ones as ``shown`` or
-``partly-outside`` (part of the box outside the crop box). Placements are
+``partly-outside`` (part of the box outside the shown area). Placements are
 read from MuPDF's draw log twice: as the document opens, and from a second
 copy of the same bytes with ``/OCProperties`` removed, which MuPDF draws
 with every optional-content group on. Each unseen placement carries the image
@@ -24,9 +31,9 @@ an image object with a one-pixel stencil mask that paints nothing: the
 dictionary is rewritten whole, so its soft mask, colour space and filters go
 with it, and every placement of it draws nothing, which is why a caller
 should name only an object no placement shows. ``remove_images`` removes the
-image draws inside a box that lies wholly outside the crop box, text and
-drawings untouched; a box inside the crop box, or one another image draw
-reaches into, is skipped, because removal takes every image it touches.
+image draws inside a box that lies wholly outside the shown area, text and
+drawings untouched; a box that reaches the shown area, or one another image
+draw reaches into, is skipped, because removal takes every image it touches.
 
 **Tagged text.** In marked content tagged ``/ActualText``, text extraction
 returns the tag's text in place of the glyphs the content draws. A tag
@@ -41,11 +48,14 @@ listed):
 * ``bbox`` -- in the rotated page frame, as ``trace_text`` reports boxes, or
   ``None`` for a tag that wraps no glyphs.
 
-MuPDF's extraction skips a tag that wraps no glyphs (one around a drawing, an
-image or nothing). Other readers may not, so the page's content streams,
-the form XObjects they draw and their marked-content property lists are also
-read directly, and a tag whose letters and digits extraction never returns
-is listed with ``bbox`` ``None``.
+A tag that wraps no glyphs (one around an image, a drawing or nothing) has no
+characters for that comparison to find. MuPDF's extraction returns the text
+of one around an image and skips the others, and other readers may differ.
+So the page's content streams, the form XObjects they draw and their
+marked-content property lists are also read directly, and a tag with letters
+or digits is listed once, with ``drawn`` ``""`` and ``bbox`` ``None``, when it
+wraps no glyph, whatever extraction returns, or when extraction never returns
+its letters and digits.
 
 A page that cannot be read is listed in ``unreadable_pages``; it is never
 reported as having nothing.
@@ -58,15 +68,20 @@ import unicodedata
 from difflib import SequenceMatcher
 
 import pymupdf as _pymupdf
+from pymupdf import mupdf as _m
 
-from .form_state import apply_page_redactions
+from .form_state import _SHOWS, _is_form, _name, apply_page_redactions, operators
 
 logger = logging.getLogger(__name__)
 
-#: A placement box this far (points) outside the crop box still counts as on it.
+#: A placement box this far (points) outside the shown area still counts as on it.
 EDGE_TOL_PT = 1.0
 #: Placement boxes match across the two views when every edge is this close.
 BOX_TOL_PT = 0.5
+
+#: US Letter: the page MuPDF and PDFium lay out when a page has no media box.
+_LETTER = (0.0, 0.0, 612.0, 792.0)
+_NO_BOX = (float("inf"), float("inf"), float("-inf"), float("-inf"))
 
 IMAGE_STATES = ("shown", "partly-outside", "outside-crop", "off-layer")
 UNSEEN_STATES = ("outside-crop", "off-layer")
@@ -123,14 +138,64 @@ def _same_box(a, b) -> bool:
     return all(abs(x - y) <= BOX_TOL_PT for x, y in zip(a, b))
 
 
-def _crop(page) -> tuple:
-    # Draw-log boxes are in the unrotated page space, whose origin is the crop
-    # box's top-left corner.
-    w, h = page.cropbox.width, page.cropbox.height
-    return (-EDGE_TOL_PT, -EDGE_TOL_PT, w + EDGE_TOL_PT, h + EDGE_TOL_PT)
+def _page_box(obj, key: str) -> tuple | None:
+    """A page box inherited from the page tree, read as MuPDF reads it (its
+    corners in either order); ``None`` when the page has no such array."""
+    value = _m.pdf_dict_get_inheritable(obj, _m.pdf_new_name(key))
+    if not _m.pdf_is_array(value):
+        return None
+    r = _m.pdf_to_rect(value)
+    return (r.x0, r.y0, r.x1, r.y1)
+
+
+def _meet(a, b) -> tuple:
+    return (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+
+
+def _empty(r) -> bool:
+    return r[0] >= r[2] or r[1] >= r[3]
+
+
+def _under_a_point(r) -> bool:
+    return r[2] - r[0] < 1.0 or r[3] - r[1] < 1.0
+
+
+def _crop(page) -> tuple | None:
+    """The area the page shows, grown by :data:`EDGE_TOL_PT`, in the space the
+    draw log uses; ``None`` when the page shows nothing.
+
+    A page shows its crop box clipped to its media box (no crop box: the media
+    box; no media box, or one with no area: US Letter). An area under a point
+    wide or high shows nothing: MuPDF draws nothing in it.
+
+    The draw log's space is unrotated, y down and scaled by ``/UserUnit``. Its
+    origin is the top-left corner of the box MuPDF lays the page out on, which
+    is the shown area itself except on a page with no usable media box.
+    """
+    obj = _m.pdf_load_object(_m.pdf_specifics(page.parent.this), page.xref)
+    media, crop = _page_box(obj, "MediaBox"), _page_box(obj, "CropBox")
+    # MuPDF's layout box (``pdf_page_obj_transform_box``).
+    laid = media or _NO_BOX
+    if crop is not None:
+        laid = _meet(laid, crop)
+    if _empty(laid):
+        laid = _LETTER
+    elif _under_a_point(laid):
+        laid = (0.0, 0.0, 1.0, 1.0)
+    paper = media if media is not None and not _empty(media) else _LETTER
+    shown = paper if crop is None else _meet(paper, crop)
+    if _under_a_point(shown):
+        return None
+    unit = _m.pdf_dict_get_real_default(obj, _m.pdf_new_name("UserUnit"), 1.0)
+    return (unit * (shown[0] - laid[0]) - EDGE_TOL_PT,
+            unit * (laid[3] - shown[3]) - EDGE_TOL_PT,
+            unit * (shown[2] - laid[0]) + EDGE_TOL_PT,
+            unit * (laid[3] - shown[1]) + EDGE_TOL_PT)
 
 
 def _inside_share(box, crop) -> float:
+    if crop is None:
+        return 0.0
     w, h = box[2] - box[0], box[3] - box[1]
     if w <= 0 or h <= 0:
         inside = crop[0] <= box[0] <= crop[2] and crop[1] <= box[1] <= crop[3]
@@ -352,7 +417,7 @@ def blank_images(doc, xrefs: list[int]) -> dict:
 
 def remove_images(doc, boxes: list[tuple[int, tuple]]) -> dict:
     """Remove the image draws inside each box, which must lie wholly outside
-    its page's crop box with no other image draw reaching into it.
+    the area its page shows with no other image draw reaching into it.
 
     Returns ``{"removed": n, "skipped": [{"page", "box"}, ...]}``. Text and
     drawings are never touched; a box that fails either test is skipped.
@@ -488,16 +553,10 @@ def _page_tag_strings(doc, page) -> list[str]:
     def walk(owner: int, depth: int) -> None:
         if depth > MAX_DEPTH:
             raise ValueError("form XObjects nest too deeply to read")
-        kind, val = doc.xref_get_key(owner, "Resources")
-        if kind == "xref":
-            m = _REF.match(val)
-            if not m:
-                return
-            owner, prefix = int(m.group(1)), ""
-        elif kind == "dict":
-            prefix = "Resources/"
-        else:
+        res = _resources_of(doc, owner)
+        if res is None:
             return
+        owner, prefix = res
         for sub in ("XObject", "Properties"):
             kind, val = doc.xref_get_key(owner, prefix + sub)
             if kind == "xref":
@@ -529,6 +588,108 @@ def _page_tag_strings(doc, page) -> list[str]:
     for xref in page.get_contents():
         found.extend(tag_strings(doc.xref_stream(xref) or b""))
     walk(page.xref, 0)
+    return found
+
+
+def _resources_of(doc, owner: int) -> tuple[int, str] | None:
+    """Where ``owner``'s ``/Resources`` dictionary is: ``(xref, key prefix)``,
+    or ``None`` when it has none."""
+    kind, val = doc.xref_get_key(owner, "Resources")
+    if kind == "xref":
+        m = _REF.match(val)
+        return (int(m.group(1)), "") if m else None
+    if kind == "dict":
+        return owner, "Resources/"
+    return None
+
+
+def _resource_text(doc, res, sub: str, name: bytes) -> tuple[str, str]:
+    """``(kind, text)`` of the resource ``name`` (a name token) of kind ``sub``,
+    an indirect object read whole."""
+    if res is None:
+        return "null", ""
+    owner, prefix = res
+    kind, val = doc.xref_get_key(owner, f"{prefix}{sub}/{_name(name)}")
+    if kind == "xref":
+        m = _REF.match(val)
+        return ("xref", m.group(1)) if m else ("null", "")
+    return kind, val
+
+
+def _opened_tag(doc, operands, res) -> list | None:
+    """``[text, False]`` for a ``BDC`` that opens an ``/ActualText`` tag,
+    written inline or named from the resources' property lists."""
+    if len(operands) == 2 and operands[1][0] == "name":
+        kind, text = _resource_text(doc, res, "Properties", operands[1][1])
+        if kind == "xref":
+            text = doc.xref_object(int(text))
+        elif kind != "dict":
+            return None
+        found = tag_strings(text.encode("latin-1", "replace"))
+    else:
+        found = tag_strings(b" ".join(tok for _, tok in operands[1:]))
+    return [found[0], False] if found else None
+
+
+def _shows_a_glyph(operands) -> bool:
+    """Whether a text-showing operator's strings hold any character code."""
+    for kind, tok in operands:
+        if kind == "str" and _literal(tok, 0):
+            return True
+        if kind == "hex" and _hex(tok, 0):
+            return True
+    return False
+
+
+def _glyphless_tags(doc, page) -> list[str]:
+    """The text of each ``/ActualText`` tag the page's content opens around no
+    glyph: no text-showing operator with a character code runs inside it, and
+    neither does any form XObject it draws. Read from the page's content
+    streams and every form they draw (followed into theirs, each read once),
+    with property lists named from the resources in force."""
+    draws: dict[int, bool] = {}
+    found: list[str] = []
+
+    def form(xref: int, res, depth: int) -> bool:
+        if xref not in draws:
+            if depth > MAX_DEPTH:
+                raise ValueError("form XObjects nest too deeply to read")
+            draws[xref] = False     # read once, even by a form that draws itself
+            draws[xref] = run(doc.xref_stream(xref) or b"",
+                              _resources_of(doc, xref) or res, depth)
+        return draws[xref]
+
+    def run(data: bytes, res, depth: int) -> bool:
+        """Read one content stream; whether it draws a glyph."""
+        open_tags: list = []        # one per open marked-content sequence
+        drew = False
+        for op, operands, _, _ in operators(data):
+            glyph = False
+            if op == b"BDC":
+                open_tags.append(_opened_tag(doc, operands, res))
+            elif op == b"BMC":
+                open_tags.append(None)
+            elif op == b"EMC" and open_tags:
+                tag = open_tags.pop()
+                if tag and not tag[1]:
+                    found.append(tag[0])
+            elif op in _SHOWS:
+                glyph = _shows_a_glyph(operands)
+            elif op == b"Do" and operands and operands[-1][0] == "name":
+                kind, ref = _resource_text(doc, res, "XObject", operands[-1][1])
+                if kind == "xref" and _is_form(doc, int(ref)):
+                    glyph = form(int(ref), res, depth + 1)
+            if glyph:
+                drew = True
+                for tag in open_tags:
+                    if tag:
+                        tag[1] = True
+        # A sequence the stream leaves open ends with it.
+        found.extend(tag[0] for tag in open_tags if tag and not tag[1])
+        return drew
+
+    data = b"\n".join(doc.xref_stream(x) or b"" for x in page.get_contents())
+    run(data, _resources_of(doc, page.xref), 0)
     return found
 
 
@@ -611,10 +772,19 @@ def _page_tag_text(doc, pno: int) -> list[dict]:
     # Tags extraction never returns: their text is in the content but not in
     # extraction's output.
     returned = _compact(with_tag)
-    for s in _page_tag_strings(doc, page):
+    strings = _page_tag_strings(doc, page)
+    for s in strings:
         c = _compact(s)
         if c and c not in returned:
             entries.append({"page": pno, "text": s, "drawn": "", "bbox": None})
+    # Tags around no glyph whose letters extraction does return: MuPDF returns
+    # a tag around an image, which has no characters for the lines to compare.
+    # Read only where some tag's letters are returned.
+    if any(c and c in returned for c in map(_compact, strings)):
+        for s in _glyphless_tags(doc, page):
+            c = _compact(s)
+            if c and c in returned:
+                entries.append({"page": pno, "text": s, "drawn": "", "bbox": None})
     return entries
 
 

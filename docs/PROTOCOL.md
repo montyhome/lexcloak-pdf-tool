@@ -1,7 +1,7 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.15.1 ships
+parent via length-prefixed JSON frames over stdin/stdout. **v0.15.2 ships
 protocol version 13.** Every earlier version from 2 stays in the supported
 set ({2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}) so a current subprocess serves older clients
 cleanly during rolling client upgrades. The table under **Versioning**
@@ -321,16 +321,22 @@ Image placements the page, as the document opens, never shows. Read-only.
  "unreadable_pages": [int, ...]}
 ```
 
-`outside-crop` is drawn wholly outside the crop box; `off-layer` is drawn only
-in optional content the document switches off. Placements are read from
-MuPDF's draw log as the document opens and from a second copy of the same
-bytes with `/OCProperties` removed (which draws every group), so object
-numbers are the source's. `bbox` is in the unrotated page space, origin at the
-crop box's top-left corner: the space `remove_images` takes. `xref` is the
+`outside-crop` is drawn wholly outside the area the page shows; `off-layer` is
+drawn only in optional content the document switches off. The area a page
+shows is its crop box clipped to its media box (no crop box: the media box; no
+media box, or one with no area: US Letter) *(clipped since 0.15.2)*. An area
+under a point wide or high, which a crop box that misses the media box leaves,
+shows nothing, so every placement on that page is `outside-crop`. Placements
+are read from MuPDF's draw log as the document opens and from a second copy of
+the same bytes with `/OCProperties` removed (which draws every group), so
+object numbers are the source's. `bbox` is in the unrotated page space, y down,
+origin at the shown area's top-left corner (on a page with no usable media box,
+at the corner of the US Letter page MuPDF lays it out on): the space
+`remove_images` takes. `xref` is the
 image object drawn, 0 for an inline image; `pixels` is its width times
 height (0 for inline); `xref_shown` says whether any placement of the same
 object, anywhere in the document, is shown. `counts` covers every placement;
-`partly-outside` is shown, with part of its box outside the crop box. A page
+`partly-outside` is shown, with part of its box outside the shown area. A page
 that cannot be read is listed in `unreadable_pages` and never reads as having
 nothing unseen; a document whose optional content cannot be read lists every
 page there.
@@ -354,12 +360,15 @@ tag's text in place of the glyphs. Read-only.
 
 `text` is what extraction returns there and `drawn` the glyphs drawn under it.
 `bbox` is in the rotated page frame, as `trace_text` reports boxes. A tag
-that wraps no glyphs (around a drawing, an image, or nothing) is skipped by
-MuPDF's extraction but not necessarily by other readers: such a tag is read
-from the page's content streams, the form XObjects they draw and their
-marked-content property lists, and listed with `drawn` `""` and `bbox` `null`
-when extraction never returns its letters and digits. A tag that only drops
-a hyphen or a space is not listed. Nothing here judges what a tag means.
+that wraps no glyphs (around an image, a drawing, or nothing) has no
+characters for that comparison to find. MuPDF's extraction returns the text
+of a tag around an image and skips the others, and other readers may differ.
+So tags are also read from the page's content streams, the form XObjects they
+draw and their marked-content property lists, and a tag with letters or
+digits is listed once, with `drawn` `""` and `bbox` `null`, when it wraps no
+glyph, whatever extraction returns *(since 0.15.2)*, or when extraction never
+returns its letters and digits. A tag that only drops a hyphen or a space is
+not listed. Nothing here judges what a tag means.
 
 ### `trace_text`  *(v7+)*
 
@@ -685,7 +694,7 @@ returns `error_type: "ValueError"` before anything is changed.
 mask that paints nothing; every placement of it then draws nothing, so name
 only an object no placement shows. `remove_images` (v12+) removes the image
 draws inside each `box` (in `list_unseen_images`'s space), with text and
-drawings untouched; a box that reaches the crop box, or that another image
+drawings untouched; a box that reaches the shown area, or that another image
 draw reaches into, is skipped, because the removal takes every image it
 touches. Both run first, with `side_text`. The response carries, **only when
 the request carried either**, `"unseen_images": {"blanked": int, "removed":
@@ -1073,3 +1082,4 @@ shipping client has caught up.
 | 0.14.2 | 12 | No new ops, no wire-surface change. A saved PDF's catalog `/Metadata` names the XMP stream or is absent; it no longer names an unrelated object. PyMuPDF saves with `preserve_metadata=1` by default, and MuPDF then puts `Root/Metadata` back into the open document after writing: from the newest xref section that has one, which once `del_xml_metadata` has run is the source file's own, and as the reference it held before garbage collection renumbered the objects. That save's bytes were right, but the next save of the same open document wrote the stale reference. 0.14.1's form text-state repair saves twice when a page needs restoring, so on such a document `strip_metadata`, `apply_redactions` (+ `_h`), `set_metadata`, `reduce_size`, the cover page and the encrypted save wrote `/Metadata` pointing at another object (a page dictionary, say) whether the XMP had been removed or kept; and a handle-held document saved by two ops in turn met the same with no form at all. No document text or XMP survived, but the file was structurally wrong and PyMuPDF's `get_xml_metadata()` raised on it. Every save `save_document` makes now passes `preserve_metadata=False`; a single save's bytes are unchanged by it. `PROTOCOL_VERSION` stays 12. |
 | 0.15.0 | **13** | Adds the optional `first_page_label` field on `extract_pages` (+ `_h`): the part's page labels count up from it in plain decimal with no prefix, so a part keeps showing the page numbers it had in its source. Without the field every part is byte-identical to 0.14.2's (trailer `/ID` aside). A bad value (not an integer of at least 1) is a `ValueError`. Bumps the protocol because an older subprocess ignores an unknown field and would return a part with no labels and no error; advertising 13 lets a client send the field only to a subprocess that writes it. The supported set widens to {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}. |
 | 0.15.1 | 13 | No new ops, no new fields. `trace_text` (+ `_h`) also ends a word between two characters of one span that do not continue each other: a gap of at least 0.15 em, a jump back of more than 0.25 em, or another baseline more than 0.5 em away (see `trace_text`). Before, a word ended only at whitespace, so a `TJ` gap, a line change or a move back inside one text object joined two runs into one word whose box spanned the gap, and a caller comparing that box with a render saw one run's ink for both. `apply_redactions`' `remove_text` and `render_removed` find words in the same trace, so a word `trace_text` reports is still found by its box and text; an entry naming a joined word from 0.15.0 is not found, and is reported kept. The dependency is capped at `pymupdf<2`: PyMuPDF 2.0 changes which glyphs a redaction removes and keeps, and 0.15.0's own tests fail under it. |
+| 0.15.2 | 13 | No new ops, no wire-surface change. Two listings now read what the page shows. (1) `list_unseen_images` (+ `_h`) measures each placement against the area the page shows, its crop box clipped to its media box. A crop box reaching past the media box was measured at its own width and height from the clipped area's corner, so an image beside or below the shown area read as `shown` and was never blanked; `apply_redactions`' `remove_images` takes the same area. A page whose shown area is under a point wide or high, as when its crop box misses its media box, shows nothing, and every placement on it is `outside-crop`. (2) `list_tag_text` (+ `_h`) lists a tag that wraps no glyph whatever extraction returns. MuPDF's extraction returns the text of a tag around an image, which has no characters for the line comparison to find, so such a tag read as returned and was never listed. A tag that repeats the glyphs it wraps is still not listed, and one the line comparison lists is not listed twice. `PROTOCOL_VERSION` stays 13. |
