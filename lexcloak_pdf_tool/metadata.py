@@ -135,20 +135,25 @@ def _set_metadata_doc(doc, fields: dict) -> None:
     ``{**doc.metadata, **fields}`` here is defensive against future
     PyMuPDF version drift.
     """
+    validate_metadata_fields(fields)
+    if not fields:
+        return
+    merged = {**(doc.metadata or {}), **fields}
+    doc.set_metadata(merged)
+
+
+def validate_metadata_fields(fields) -> None:
+    """Raise ``ValueError`` unless ``fields`` is a dict of known metadata keys."""
     if not isinstance(fields, dict):
         raise ValueError(
             f"fields must be a dict, got {type(fields).__name__}"
         )
-    if not fields:
-        return
     unknown = set(fields.keys()) - _ALLOWED_METADATA_KEYS
     if unknown:
         raise ValueError(
             f"unknown metadata key(s): {sorted(unknown)}. "
             f"Allowed: {sorted(_ALLOWED_METADATA_KEYS)}"
         )
-    merged = {**(doc.metadata or {}), **fields}
-    doc.set_metadata(merged)
 
 
 def set_metadata(pdf_bytes: bytes, fields: dict) -> bytes:

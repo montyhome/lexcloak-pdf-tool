@@ -628,6 +628,117 @@ def _validate_pages(pages, name: str) -> set[int]:
     return set(pages)
 
 
+# The steps of a burn, one function each, in the order ``_apply_redactions_doc``
+# runs them. A held copy (``held.py``, v0.16.0) runs the same functions one
+# page at a time, so the two burns can differ only in when each step runs.
+
+
+def _burn_plan(matches: list[dict], removed_set: set[int],
+               blackout_set: set[int], active_set: set[str] | None
+               ) -> dict[int, list[dict]]:
+    """The matches each page burns, by page, in payload order.
+
+    A disabled match, one on a removed or blacked-out page, and one whose
+    ``type`` is not active are left out; ``Manual Region`` and ``Custom``
+    are active whatever the categories say.
+    """
+    by_page: dict[int, list[dict]] = {}
+    for m in matches:
+        if not m.get("enabled", True):
+            continue
+        if m["page"] in removed_set:
+            continue
+        if m["page"] in blackout_set:
+            # The whole-page cover below supersedes any individual box on a
+            # blackout page; skip per-match work so the page's safety never
+            # rides on per-match completeness.
+            continue
+        if active_set is not None and m.get("type") not in active_set:
+            if m.get("type") not in ("Manual Region", "Custom"):
+                continue
+        by_page.setdefault(m["page"], []).append(m)
+    return by_page
+
+
+def _burn_page(doc, pg_num: int, pg_matches: list[dict], redact_label: str,
+               keep_uncovered_lines: bool) -> None:
+    """Burn one page's matches (see ``_burn_plan``)."""
+    from .keep_lines import burn_keeping_lines
+
+    page = doc[pg_num]
+    boxes = _page_boxes(page, pg_matches, redact_label)
+    # v0.11.0: a box keeps the glyphs of a line it does not reach, which
+    # MuPDF's filter would otherwise take by their ascender/descender
+    # boxes (see keep_lines.py). Returns False, changing nothing, on a
+    # page where nothing would be kept; that page burns as before.
+    if keep_uncovered_lines and burn_keeping_lines(
+            doc, pg_num, boxes, _add_burn_annots):
+        return
+    _add_burn_annots(page, boxes)
+    apply_page_redactions(page)
+
+
+def _blackout_page(doc, pg_num: int) -> None:
+    """Cover one page edge to edge in solid black and scrub what is under it.
+
+    The cover rect is the full *displayed* page mapped into native
+    (add_redact_annot) space via the same pinned derotation as the
+    per-match path, then inflated ``_EDGE_OVERSCAN`` past every edge
+    because content drawn OUTSIDE the page box -- clipped print
+    headers/footers -- pokes sliver glyphs into the page that extract via
+    ``get_text`` yet survive a page-bounds redaction region (the text
+    filter keeps sliver-overlap glyphs). The inflated region fully contains
+    them; the rendered page is identical (fills clip to the page), so the
+    blackout invariant is solid black AND zero extractable chars.
+    """
+    page = doc[pg_num]
+    rect = Rect(page.rect)
+    if page.rotation:
+        rect = _derotate_to_native(rect, page)
+    rect = Rect(rect.x0 - _EDGE_OVERSCAN, rect.y0 - _EDGE_OVERSCAN,
+                rect.x1 + _EDGE_OVERSCAN, rect.y1 + _EDGE_OVERSCAN)
+    page.add_redact_annot(rect, fill=(0, 0, 0))
+    apply_page_redactions(page)
+
+
+def _touched_pages(page_count: int, burned_pages, blackout_set: set[int],
+                   removal_plan: dict | None, tag_pages: set[int],
+                   removed_set: set[int]) -> set[int]:
+    """The pages a redaction burned or removed text from, in the indices they
+    will have once removed pages are deleted: a tag on one of them can still
+    hold the words the burn took off the glyphs (see ``sanitise``)."""
+    touched = set(burned_pages) | {p for p in blackout_set if 0 <= p < page_count}
+    if removal_plan is not None:
+        touched |= set(removal_plan)
+    # v0.14.0: pages whose tags the caller wants gone without a burn.
+    touched |= tag_pages
+    touched -= removed_set
+    removed_sorted = sorted(p for p in removed_set if 0 <= p < page_count)
+    return {p - sum(1 for r in removed_sorted if r < p)
+            for p in touched if 0 <= p < page_count}
+
+
+def _remove_pages(doc, removed_set: set[int]) -> None:
+    """Delete the removed pages, and null every object that named one."""
+    if not removed_set:
+        return
+    valid_removed = {p for p in removed_set if 0 <= p < len(doc)}
+    if valid_removed and len(valid_removed) >= len(doc):
+        raise ValueError("Cannot export: all pages have been removed")
+    removed_xrefs = [doc[p].xref for p in valid_removed]
+    for pg_num in sorted(valid_removed, reverse=True):
+        doc.delete_page(pg_num)
+    # v0.13.0: deleting a page takes it out of the page tree, but anything
+    # else that names the page object keeps it, and its content, in the
+    # saved file. A structure element's /Pg and a named destination's
+    # target array both do: a removed page's text shipped in the export
+    # whenever the document was tagged or had named destinations. Writing
+    # the object as null leaves those references pointing at nothing, and
+    # the save's garbage collection drops the content they kept alive.
+    for xref in removed_xrefs:
+        doc.update_object(xref, "null")
+
+
 def _apply_redactions_doc(doc, matches: list[dict],
                           redact_label: str = "",
                           active_categories: list[str] | set[str] | None = None,
@@ -693,7 +804,6 @@ def _apply_redactions_doc(doc, matches: list[dict],
     "skipped_blank": [xref, ...], "skipped_remove": [{"page", "box"}, ...]}``.
     ``None`` changes nothing.
     """
-    from .keep_lines import burn_keeping_lines
     from .remove_text import remove_text_doc, validate_remove_text
 
     _validate_redaction_payload(matches, removed_pages, blackout_pages)
@@ -742,90 +852,22 @@ def _apply_redactions_doc(doc, matches: list[dict],
                                   skip_pages=removed_set | blackout_set)
         if removal_sink is not None:
             removal_sink.update(outcome)
-    by_page: dict[int, list[dict]] = {}
-    for m in matches:
-        if not m.get("enabled", True):
-            continue
-        if m["page"] in removed_set:
-            continue
-        if m["page"] in blackout_set:
-            # The whole-page cover below supersedes any individual box on a
-            # blackout page; skip per-match work so the page's safety never
-            # rides on per-match completeness.
-            continue
-        if active_set is not None and m.get("type") not in active_set:
-            if m.get("type") not in ("Manual Region", "Custom"):
-                continue
-        by_page.setdefault(m["page"], []).append(m)
-
+    by_page = _burn_plan(matches, removed_set, blackout_set, active_set)
     for pg_num, pg_matches in by_page.items():
-        page = doc[pg_num]
-        boxes = _page_boxes(page, pg_matches, redact_label)
-        # v0.11.0: a box keeps the glyphs of a line it does not reach, which
-        # MuPDF's filter would otherwise take by their ascender/descender
-        # boxes (see keep_lines.py). Returns False, changing nothing, on a
-        # page where nothing would be kept; that page burns as before.
-        if keep_uncovered_lines and burn_keeping_lines(
-                doc, pg_num, boxes, _add_burn_annots):
-            continue
-        _add_burn_annots(page, boxes)
-        apply_page_redactions(page)
+        _burn_page(doc, pg_num, pg_matches, redact_label, keep_uncovered_lines)
 
-    # Full-page blackout: cover each blackout page edge-to-edge
-    # in solid black and SCRUB the content beneath it. Runs before the
-    # ``removed_set`` delete so both operate on original page indices, and on
-    # the disjoint page set the per-match loop skipped (blackout pages are
-    # excluded from ``by_page``), so no page gets ``apply_redactions`` twice.
-    # The cover rect is the full *displayed* page mapped into native
-    # (add_redact_annot) space via the same pinned derotation as the
-    # per-match path, then inflated ``_EDGE_OVERSCAN`` past every edge
-    # because content drawn OUTSIDE the page box -- clipped print
-    # headers/footers -- pokes sliver glyphs into the page that extract via
-    # ``get_text`` yet survive a page-bounds redaction region (the text
-    # filter keeps sliver-overlap glyphs). The inflated region fully contains
-    # them; the rendered page is identical (fills clip to the page), so the
-    # blackout invariant is solid black AND zero extractable chars.
+    # Full-page blackout. Runs before the ``removed_set`` delete so both
+    # operate on original page indices, and on the disjoint page set the
+    # per-match loop skipped (blackout pages are excluded from ``by_page``),
+    # so no page gets ``apply_redactions`` twice.
     for pg_num in sorted(blackout_set):
         if not (0 <= pg_num < len(doc)):
             continue
-        page = doc[pg_num]
-        rect = Rect(page.rect)
-        if page.rotation:
-            rect = _derotate_to_native(rect, page)
-        rect = Rect(rect.x0 - _EDGE_OVERSCAN, rect.y0 - _EDGE_OVERSCAN,
-                    rect.x1 + _EDGE_OVERSCAN, rect.y1 + _EDGE_OVERSCAN)
-        page.add_redact_annot(rect, fill=(0, 0, 0))
-        apply_page_redactions(page)
+        _blackout_page(doc, pg_num)
 
-    # The pages a redaction burned or removed text from, in the indices they
-    # will have once removed pages are deleted: a tag on one of them can still
-    # hold the words the burn took off the glyphs (see ``sanitise``).
-    touched = set(by_page) | {p for p in blackout_set if 0 <= p < len(doc)}
-    if removal_plan is not None:
-        touched |= set(removal_plan)
-    # v0.14.0: pages whose tags the caller wants gone without a burn.
-    touched |= tag_pages
-    touched -= removed_set
-    removed_sorted = sorted(p for p in removed_set if 0 <= p < len(doc))
-    touched = {p - sum(1 for r in removed_sorted if r < p)
-               for p in touched if 0 <= p < len(doc)}
-
-    if removed_set:
-        valid_removed = {p for p in removed_set if 0 <= p < len(doc)}
-        if valid_removed and len(valid_removed) >= len(doc):
-            raise ValueError("Cannot export: all pages have been removed")
-        removed_xrefs = [doc[p].xref for p in valid_removed]
-        for pg_num in sorted(valid_removed, reverse=True):
-            doc.delete_page(pg_num)
-        # v0.13.0: deleting a page takes it out of the page tree, but anything
-        # else that names the page object keeps it, and its content, in the
-        # saved file. A structure element's /Pg and a named destination's
-        # target array both do: a removed page's text shipped in the export
-        # whenever the document was tagged or had named destinations. Writing
-        # the object as null leaves those references pointing at nothing, and
-        # the save's garbage collection drops the content they kept alive.
-        for xref in removed_xrefs:
-            doc.update_object(xref, "null")
+    touched = _touched_pages(len(doc), by_page, blackout_set, removal_plan,
+                             tag_pages, removed_set)
+    _remove_pages(doc, removed_set)
 
     # Strip residue that lives OUTSIDE page content streams (annotation text,
     # attachments, document JavaScript, pre-burn page thumbnails) -- none of it
