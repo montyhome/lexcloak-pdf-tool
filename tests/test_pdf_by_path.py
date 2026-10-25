@@ -90,7 +90,7 @@ def test_the_tables_cover_every_op_that_returns_a_pdf():
     returning = {name for name, fn in M._OPS.items()
                  if "_pdf_result(" in inspect.getsource(fn)
                  or "_redaction_result(" in inspect.getsource(fn)}
-    assert returning == set(STATELESS) | set(HANDLE) | {"encrypt_h"}
+    assert returning == set(STATELESS) | set(HANDLE) | {"encrypt_h", "assemble_h"}
 
 
 @pytest.mark.parametrize("op", sorted(STATELESS))
@@ -126,6 +126,20 @@ def test_a_handle_pdf_result_goes_to_out_path(tmp_path, op):
     assert resp["ok"] is True, resp
     assert resp["result"]["pdf_path"] == str(out)
     assert pymupdf.open(str(out)).page_count >= 1 or op == "encrypt_h"
+
+
+def test_a_held_copys_assembly_goes_to_out_path(tmp_path):
+    out = tmp_path / "out.pdf"
+    with CLISession() as s:
+        handle = s.call("open_held", pdf_b64=_b64(_make_pdf()))["result"]["handle"]
+        inline = s.call("assemble_h", handle=handle, matches=[_MATCH])
+        resp = s.call("assemble_h", handle=handle, out_path=str(out), matches=[_MATCH])
+    assert resp["ok"] is True, resp
+    assert resp["result"]["pdf_path"] == str(out)
+    assert resp["result"]["pdf_size"] == out.stat().st_size
+    assert "pdf_b64" not in resp["result"]
+    assert (_canonical_pdf(_file_bytes(out))
+            == _canonical_pdf(base64.b64decode(inline["result"]["pdf_b64"])))
 
 
 def test_an_op_reads_its_pdf_from_pdf_path(tmp_path):

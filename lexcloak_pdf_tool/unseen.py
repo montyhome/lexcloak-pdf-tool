@@ -227,10 +227,71 @@ def _page_placements(page, view_page) -> list[tuple[str, tuple]]:
 
 
 def _xref_boxes(page) -> list[tuple[int, tuple]]:
-    """``(xref, box)`` per image draw. Slow: MuPDF hashes every image to
-    resolve the numbers."""
+    """``(xref, box)`` per image draw.
+
+    A draw names its image object only through a hash: MuPDF's draw log
+    carries each drawn image's pixel digest, and an object's number is found
+    by hashing objects until one matches. PyMuPDF's
+    ``get_image_info(xrefs=True)`` hashes every image the page's resources
+    name, so on scans that share one resource dictionary every page hashed
+    every scan in the file, and the listing grew with pages times images.
+    Since v0.16.0 the images the page's content draws by name are hashed
+    first (:func:`_drawn_images`), and every named image is hashed, as
+    before, only when some draw matches none of them: an inline image, an
+    image drawn by a pattern or a font, one whose soft mask changes its
+    digest, or content that cannot be read.
+    """
+    doc = page.parent
+    drawn = _drawn_images(doc, page)
+    if drawn is not None:
+        info = [i for i in page.get_image_info(hashes=True) if i.get("bbox") is not None]
+        digests = {}
+        for xref in drawn:
+            pix = _pymupdf.Pixmap(doc, xref)
+            digests[pix.digest] = xref
+            del pix
+        if all(i["digest"] in digests for i in info):
+            return [(digests[i["digest"]], tuple(float(v) for v in i["bbox"]))
+                    for i in info]
     return [(int(i.get("xref") or 0), tuple(float(v) for v in i["bbox"]))
             for i in page.get_image_info(xrefs=True) if i.get("bbox") is not None]
+
+
+def _drawn_images(doc, page) -> list[int] | None:
+    """The image objects the page's content draws with ``Do``, through every
+    form it draws, each listed once in the order first drawn. ``None`` when
+    that cannot be read: a page without resources of its own (they are then
+    inherited from the page tree), or content that does not parse."""
+    res = _resources_of(doc, page.xref)
+    if res is None:
+        return None
+    found: list[int] = []
+    forms: set[int] = set()
+
+    def run(data: bytes, res, depth: int) -> None:
+        if depth > MAX_DEPTH:
+            raise ValueError("form XObjects nest too deeply to read")
+        for op, operands, _, _ in operators(data):
+            if op != b"Do" or not operands or operands[-1][0] != "name":
+                continue
+            kind, ref = _resource_text(doc, res, "XObject", operands[-1][1])
+            if kind != "xref":
+                continue
+            xref = int(ref)
+            subtype = doc.xref_get_key(xref, "Subtype")[1]
+            if subtype == "/Image":
+                if xref not in found:
+                    found.append(xref)
+            elif subtype == "/Form" and xref not in forms:
+                forms.add(xref)
+                run(doc.xref_stream(xref) or b"", _resources_of(doc, xref) or res,
+                    depth + 1)
+
+    try:
+        run(b"\n".join(doc.xref_stream(x) or b"" for x in page.get_contents()), res, 0)
+    except (ValueError, RuntimeError):
+        return None
+    return found
 
 
 def _xref_at(pairs, box) -> int:
@@ -783,15 +844,17 @@ def _page_tag_text(doc, pno: int) -> list[dict]:
     return entries
 
 
-def list_tag_text(doc) -> dict:
+def list_tag_text(doc, pages=None) -> dict:
     """Where text extraction's text differs from what the content draws.
 
     Returns ``{"entries": [{"page", "text", "drawn", "bbox"}],
-    "unreadable_pages": [int]}``; see the module docstring.
+    "unreadable_pages": [int]}``; see the module docstring. ``pages`` (v0.16.0)
+    lists the page indices to read, each read exactly as the whole listing
+    reads it; ``None`` reads them all.
     """
     entries: list[dict] = []
     unreadable: list[int] = []
-    for pno in range(len(doc)):
+    for pno in (range(len(doc)) if pages is None else pages):
         try:
             entries.extend(_page_tag_text(doc, pno))
         except Exception as exc:  # noqa: BLE001 -- reported, never "nothing"

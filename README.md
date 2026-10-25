@@ -13,6 +13,8 @@ A subprocess CLI that wraps a narrow set of PyMuPDF operations:
 - Run Tesseract OCR on rendered pages and parse the hOCR output.
 - Search for text on a page (substring, whole-word, or head/tail split).
 - Apply content-stream redactions (black-box matches, optional re-encryption).
+- Burn a held copy of a document a page at a time and assemble it into the
+  same file a single burn gives (protocol 14).
 - Strip metadata and XMP.
 - Page count, single-page size, batch all-page sizes, encryption-state probes.
 - Authenticate password-protected PDFs.
@@ -36,6 +38,11 @@ The CLI speaks two protocol modes against the same socket:
 
 Both modes are served by the same subprocess; v4 is purely additive over
 v2/v3. Older clients keep working unchanged against a v4 server.
+
+* **Held copies (v14+)** — `open_held` holds one copy of a document,
+  `burn_page_h` burns it a page at a time in any order, `restore_page_h`
+  puts a page back, and `assemble_h` makes the delivered file on a fork,
+  the same file `apply_redactions` gives. See `docs/PROTOCOL.md`.
 
 ## Why public and AGPL
 

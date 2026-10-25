@@ -1,9 +1,9 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.15.2 ships
-protocol version 13.** Every earlier version from 2 stays in the supported
-set ({2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}) so a current subprocess serves older clients
+parent via length-prefixed JSON frames over stdin/stdout. **v0.16.0 ships
+protocol version 14.** Every earlier version from 2 stays in the supported
+set ({2, 3, ..., 14}) so a current subprocess serves older clients
 cleanly during rolling client upgrades. The table under **Versioning**
 records what each version added.
 
@@ -18,6 +18,10 @@ There are two protocol modes (the subprocess speaks both simultaneously):
   via LRU eviction (oldest-evicted-first). Designed for callers that
   perform many per-page reads on the same PDF — eliminates the
   per-call IPC payload re-shoveling cost.
+* **Held copies** (v14+) — `open_held` holds one copy of a document that
+  `burn_page_h` burns a page at a time, in any order, and `assemble_h` turns
+  into the file `apply_redactions` gives for the same payload. See **Held
+  copies** below.
 
 ## Frame format
 
@@ -340,6 +344,14 @@ object, anywhere in the document, is shown. `counts` covers every placement;
 that cannot be read is listed in `unreadable_pages` and never reads as having
 nothing unseen; a document whose optional content cannot be read lists every
 page there.
+
+To find which object a draw shows, the listing hashes images and matches
+their digests against the draw log's. Since 0.16.0 it hashes the images the
+page's content draws by name first, and every image the page's resources name
+only when a draw matches none of those (an inline image, an image drawn by a
+pattern or a font, a soft-masked image, or content it cannot parse). Scans
+that share one resource dictionary no longer make every page hash every scan
+in the file. The result is unchanged.
 
 ### `list_tag_text`  *(v12+)*
 
@@ -999,6 +1011,121 @@ exception: PyMuPDF applies encryption at save time, so the cached doc stays
 cleartext and reusable after an `encrypt_h` call. Callers that need to
 preserve a mutated original should keep their own `pdf_bytes` reference.
 
+## Held copies (v14+)
+
+A held copy is one document, held open, that is burned a page at a time and
+assembled into the delivered file when it is wanted. The file is the one
+`apply_redactions` gives for the same payload: every page's pixels, words,
+images, annotations and links, the outline, named destinations, page labels,
+structure tree and metadata, and the objects with their numbers blanked. It
+is not byte-identical, because objects are numbered in the order they are
+made. Three rules make that true:
+
+1. The image edits (`blank_images`, `remove_images`) and form flattening run
+   once, when the copy is opened. A burn that reaches an image draws a
+   redacted copy of it, so an edit made after the burn would land on an
+   object no page draws.
+2. Putting a page back covers what its burn changed in place: the page
+   dictionary, the objects only that page reaches, and the structure
+   elements MuPDF edits through the `/ParentTree` (their alternate text, for
+   the characters it removes). When such an object is shared with another
+   burned page and has changed, that page goes back too.
+3. A held page is finished: a blacked-out page is covered, its annotations
+   other than links are deleted, and its content tags are stripped when it is
+   touched. So a held page renders and extracts as the delivered page does,
+   and the page's checks can read it.
+
+A held copy's handle lives in the same cache as `open_doc`'s (16 entries, LRU)
+and is closed by `close_doc`. Every handle op that only reads (`render_h`,
+`extract_*_h`, `trace_text_h`, `search_for_h`, the listings, `page_count_h`,
+`extract_pages_h`, `render_removed_h` ...) reads the held pages as they now
+are. The ops that save a handle's document in place (`apply_redactions_h`,
+`strip_metadata_h`, `set_metadata_h`, `insert_cover_page_h`, `reduce_size_h`,
+`encrypt_h`) refuse a held copy with `error_type: "NotAHeldCopy"`, and the
+held-copy ops refuse an `open_doc` handle the same way.
+
+### `open_held`
+
+| Input field | Type | Default |
+|---|---|---|
+| `pdf_b64` (or `pdf_path`) | base64 string | required (unencrypted) |
+| `blank_images` | list of object numbers | omitted |
+| `remove_images` | list of `{page, box}` | omitted |
+
+The image fields are `apply_redactions`' own, listed from these same bytes,
+and fixed for the copy's life. **Result:** `{"handle": str, "page_count":
+int}`, plus `"unseen_images": {"blanked", "removed", "skipped_blank",
+"skipped_remove"}` when either image field was sent.
+
+### `burn_page_h`
+
+| Input field | Type | Default |
+|---|---|---|
+| `handle` | string | required |
+| `page` | integer | required |
+| `matches` | list | `[]` — this page's, in `apply_redactions`' shape |
+| `redact_label` | string | `""` |
+| `active_categories` | list of strings | omitted (every type) |
+| `keep_uncovered_lines` | boolean | `false` |
+| `blackout` | boolean | `false` — the page is in `blackout_pages` |
+| `remove_text` | list | omitted — this page's `remove_text` entries |
+| `strip_tags` | boolean | `false` — the page is in `strip_tags_pages` |
+
+Burns the page and finishes it (rule 3), filtering the matches as
+`apply_redactions` does. Every match and `remove_text` entry must name this
+page (`ValueError` otherwise), and a page already burned is refused
+(`HeldPageError`): put it back first. A removed page is not burned. **Result:**
+`{"page": int}`, plus `"text_removal": {"removed": [[page, i], ...], "kept":
+[...]}` when `remove_text` was sent, its indices into this page's entries.
+
+### `restore_page_h`
+
+`handle`, `page`. Puts a burned page back as it was before its burn.
+**Result:** `{"restored": [page, ...]}`: the page, and every burned page that
+had to go back with it (rule 2), in page order. Each must be burned again. A
+page that is not burned is refused (`HeldPageError`).
+
+### `list_tag_text_page_h`
+
+`handle` (any handle), `page`. `list_tag_text` for one page, read exactly as
+the whole listing reads it: `{"entries": [...], "unreadable_pages": [...]}`.
+On a held copy it reads the held page.
+
+### `assemble_h`
+
+`handle`, and `apply_redactions`' fields: `matches`, `redact_label`,
+`active_categories`, `removed_pages`, `blackout_pages`, `remove_text`,
+`keep_uncovered_lines`, `side_text`, `strip_tags_pages`; plus an optional
+`metadata` (`set_metadata`'s `fields`) and `out_path`. `blank_images`,
+`remove_images` and `output_protection` are refused (`ValueError`): the image
+plan is the copy's own, and the file is saved without a password.
+
+The held copy is serialised and opened as a fork, and the held copy is left
+exactly as it was. On the fork, every page whose burn does not match this
+payload, or that was never burned, is put back and burned again, and removed
+pages are put back before they go, so a stale page never reaches the file.
+Then come the side-text rewrite, the page removal, the residue scrub, the
+metadata strip, `metadata` and one clean save. **Result:** the PDF
+(`pdf_b64`, or `pdf_path` + `pdf_size`), `"burned_at_assembly": [page, ...]`
+(the pages burned on the fork), `"text_removal"` and `"side_text"` exactly as
+`apply_redactions` reports them when those fields were sent, and
+`"unseen_images"` when the copy was opened with an image plan. A payload
+`apply_redactions` would refuse is refused with the same error type; a match
+on a page outside the document is an `IndexError`.
+
+`side_text` ids are the source's, as for `apply_redactions`. The rewrite runs
+after the pages are burned, and a burn takes some strings out of the file
+itself (a structure element's alternate text, a link a box touches); an edit
+whose string the burn took is counted as applied, as `apply_redactions`, which
+rewrites first, counts it.
+
+**Size.** Each burn compresses the streams it creates exactly as the clean
+save would, so a held copy of a scanned document stays near the size of the
+source plus the delivered file rather than several times it, and the save
+copies them unchanged. A step deletes the redaction annotations it made and
+no longer reaches; anything else a burn made that no page draws any more is
+left to the save's garbage collection.
+
 ## CLI flags
 
 The binary is normally driven entirely over the stdin/stdout frame protocol,
@@ -1023,7 +1150,7 @@ Every successful or failed op writes one stderr line:
 On startup, exactly one stderr line:
 
 ```
-lexcloak_pdf_tool starting protocol_version=4 pymupdf_version=<x.y.z>
+lexcloak_pdf_tool starting protocol_version=14 pymupdf_version=<x.y.z>
 ```
 
 Stdout is reserved for protocol frames -- a downstream pipe-consumer will
@@ -1083,3 +1210,4 @@ shipping client has caught up.
 | 0.15.0 | **13** | Adds the optional `first_page_label` field on `extract_pages` (+ `_h`): the part's page labels count up from it in plain decimal with no prefix, so a part keeps showing the page numbers it had in its source. Without the field every part is byte-identical to 0.14.2's (trailer `/ID` aside). A bad value (not an integer of at least 1) is a `ValueError`. Bumps the protocol because an older subprocess ignores an unknown field and would return a part with no labels and no error; advertising 13 lets a client send the field only to a subprocess that writes it. The supported set widens to {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}. |
 | 0.15.1 | 13 | No new ops, no new fields. `trace_text` (+ `_h`) also ends a word between two characters of one span that do not continue each other: a gap of at least 0.15 em, a jump back of more than 0.25 em, or another baseline more than 0.5 em away (see `trace_text`). Before, a word ended only at whitespace, so a `TJ` gap, a line change or a move back inside one text object joined two runs into one word whose box spanned the gap, and a caller comparing that box with a render saw one run's ink for both. `apply_redactions`' `remove_text` and `render_removed` find words in the same trace, so a word `trace_text` reports is still found by its box and text; an entry naming a joined word from 0.15.0 is not found, and is reported kept. The dependency is capped at `pymupdf<2`: PyMuPDF 2.0 changes which glyphs a redaction removes and keeps, and 0.15.0's own tests fail under it. |
 | 0.15.2 | 13 | No new ops, no wire-surface change. Two listings now read what the page shows. (1) `list_unseen_images` (+ `_h`) measures each placement against the area the page shows, its crop box clipped to its media box. A crop box reaching past the media box was measured at its own width and height from the clipped area's corner, so an image beside or below the shown area read as `shown` and was never blanked; `apply_redactions`' `remove_images` takes the same area. A page whose shown area is under a point wide or high, as when its crop box misses its media box, shows nothing, and every placement on it is `outside-crop`. (2) `list_tag_text` (+ `_h`) lists a tag that wraps no glyph whatever extraction returns. MuPDF's extraction returns the text of a tag around an image, which has no characters for the line comparison to find, so such a tag read as returned and was never listed. A tag that repeats the glyphs it wraps is still not listed, and one the line comparison lists is not listed twice. `PROTOCOL_VERSION` stays 13. |
+| 0.16.0 | **14** | Adds held copies: `open_held`, `burn_page_h`, `restore_page_h`, `list_tag_text_page_h` and `assemble_h` (see **Held copies**). A held copy is burned a page at a time, in any order, into one copy of the document, and assembled on a fork into the file `apply_redactions` gives for the same payload: every page's render, words, images, annotations and links, every document structure, and the objects with their numbers blanked. A page put back takes back its own objects and the structure elements its burn edited, and any page sharing a changed one goes back with it. Each burn compresses the streams it creates exactly as the clean save does, through MuPDF's own encoders, so a held copy stays near the source's size plus the file's and the assembly's save has little left to do. Every read-only handle op reads a held copy's pages; the six ops that save a handle's document in place refuse one (`NotAHeldCopy`). `list_unseen_images` (+ `_h`) hashes only the images a page draws when that is enough to name every draw's object, so scans sharing one resource dictionary no longer cost pages times images; its result is unchanged. `apply_redactions` is unchanged: its steps moved into functions the held copy shares, in the same order. The supported set widens to {2, ..., 14}. |

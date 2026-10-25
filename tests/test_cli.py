@@ -536,7 +536,7 @@ def test_startup_line_emitted_on_stderr():
     code, stderr = s.close()
     text = stderr.decode("utf-8", errors="replace")
     assert "lexcloak_pdf_tool starting" in text
-    assert "protocol_version=13" in text
+    assert "protocol_version=14" in text
     assert "pymupdf_version=" in text
 
 
@@ -582,7 +582,7 @@ def test_protocol_version_v1_rejected():
     assert resp["error_type"] == "ProtocolVersionMismatch"
 
 
-def test_protocol_version_v14_rejected():
+def test_protocol_version_v15_rejected():
     """Future versions outside the supported set are rejected.
 
     Was ``v5_rejected`` until 0.6.8 (`render_clip` + `list_annotations`),
@@ -592,17 +592,29 @@ def test_protocol_version_v14_rejected():
     until 0.10.0 (`render_removed`) and ``v10_rejected`` until 0.12.0 (PDFs
     by path), ``v11_rejected`` until 0.13.0 (strings outside the page
     content), ``v12_rejected`` until 0.14.0 (content the page does not
-    show) and ``v13_rejected`` until 0.15.0 (page labels on a split part).
+    show), ``v13_rejected`` until 0.15.0 (page labels on a split part) and
+    ``v14_rejected`` until 0.16.0 (held copies).
     The assertion it encodes -- "a version
     we do not know is refused, not ignored" -- is what matters, so it moves
     to the next unsupported number rather than being deleted.
     """
     with CLISession() as s:
-        s.write_frame({"protocol_version": 14, "op": "page_count",
+        s.write_frame({"protocol_version": 15, "op": "page_count",
                        "pdf_b64": _b64(_make_pdf())})
         resp = s.read_frame()
     assert resp["ok"] is False
     assert resp["error_type"] == "ProtocolVersionMismatch"
+
+
+def test_protocol_version_v14_now_accepted():
+    """v14 is the version that holds a copy and burns it a page at a time (0.16.0)."""
+    with CLISession() as s:
+        opened = s.call("open_held", protocol_version=14, pdf_b64=_b64(_make_pdf()))
+        assert opened["ok"] is True, opened
+        burned = s.call("burn_page_h", protocol_version=14,
+                        handle=opened["result"]["handle"], page=0, matches=[])
+    assert burned["ok"] is True, burned
+    assert burned["result"] == {"page": 0}
 
 
 def test_protocol_version_v13_now_accepted():

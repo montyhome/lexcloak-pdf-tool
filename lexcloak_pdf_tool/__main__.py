@@ -70,6 +70,7 @@ from lexcloak_pdf_tool import (
 from lexcloak_pdf_tool.coords import deserialize_chardata, serialize_chardata
 from lexcloak_pdf_tool.cover_page import _insert_cover_page_doc
 from lexcloak_pdf_tool.form_state import save_document
+from lexcloak_pdf_tool.held import HeldDocument
 from lexcloak_pdf_tool.page_split import (
     extract_pages, extract_pages_from_doc, validate_first_page_label,
 )
@@ -199,28 +200,37 @@ _pymupdf.set_messages(stream=sys.stderr)
 # ops, and ``drawn_only`` on both extract_text_plain ops.
 # v13 (0.15.0) adds the optional ``first_page_label`` field on both
 # extract_pages ops: the part's page labels count up from it.
+# v14 (0.16.0) adds held copies: ``open_held``, ``burn_page_h``,
+# ``restore_page_h``, ``list_tag_text_page_h`` and ``assemble_h`` (see
+# ``held.py``).
 # Older versions stay supported so a newer
 # subprocess can still serve older clients cleanly; once every shipping
 # client speaks v4+, drop 2 + 3 from the set.
-PROTOCOL_VERSION = 13
-SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
+PROTOCOL_VERSION = 14
+SUPPORTED_PROTOCOL_VERSIONS = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
 MAX_PAYLOAD_BYTES = 256 * 1024 * 1024  # 256 MiB per frame.
 LENGTH_PREFIX_BYTES = 4
 LENGTH_STRUCT = struct.Struct(">I")  # big-endian uint32.
 
 
 # ── Stateful handle cache (v4) ───────────────────────────────────────
-# UUID-keyed cache of parsed ``pymupdf.Document`` instances. ``OrderedDict``
-# carries LRU eviction order: ``move_to_end`` on access, ``popitem(last=
-# False)`` to evict the oldest. Bound the cache to a small N so a long-
-# running subprocess that leaks handles (or holds many concurrently for a
-# legitimate compare-docs use case) can't exhaust memory.
+# UUID-keyed cache of parsed ``pymupdf.Document`` instances, and since v14 of
+# held copies (``HeldDocument``), which share the bound and the eviction.
+# ``OrderedDict`` carries LRU eviction order: ``move_to_end`` on access,
+# ``popitem(last=False)`` to evict the oldest. Bound the cache to a small N
+# so a long-running subprocess that leaks handles (or holds many
+# concurrently for a legitimate compare-docs use case) can't exhaust memory.
 _DOC_CACHE_MAX_SIZE = 16
-_DOC_CACHE: "OrderedDict[str, _pymupdf.Document]" = OrderedDict()
+_DOC_CACHE: "OrderedDict[str, _pymupdf.Document | HeldDocument]" = OrderedDict()
 
 
 class HandleNotFound(Exception):
     """Raised when a handle-bearing op references a missing or closed handle."""
+
+
+class NotAHeldCopy(Exception):
+    """Raised when a held-copy op names a handle ``open_doc`` opened, or when
+    an op that saves the handle's document in place names a held copy."""
 
 
 def _evict_lru_if_full() -> None:
@@ -233,12 +243,25 @@ def _evict_lru_if_full() -> None:
             pass
 
 
-def _store_handle(doc: _pymupdf.Document) -> str:
+def _store_handle(doc: "_pymupdf.Document | HeldDocument") -> str:
     """Insert ``doc`` under a fresh UUID handle. Evicts LRU if at capacity."""
     _evict_lru_if_full()
     handle = str(uuid.uuid4())
     _DOC_CACHE[handle] = doc
     return handle
+
+
+def _cached(handle: Any) -> "_pymupdf.Document | HeldDocument":
+    """The cache entry for ``handle``, marked MRU, or :class:`HandleNotFound`."""
+    if not isinstance(handle, str) or not handle:
+        raise HandleNotFound(
+            f"handle must be a non-empty string, got {type(handle).__name__}"
+        )
+    entry = _DOC_CACHE.get(handle)
+    if entry is None:
+        raise HandleNotFound(f"unknown or closed handle: {handle}")
+    _DOC_CACHE.move_to_end(handle)
+    return entry
 
 
 def _resolve_handle(handle: Any) -> _pymupdf.Document:
@@ -248,16 +271,32 @@ def _resolve_handle(handle: Any) -> _pymupdf.Document:
     of the wrong type. The CLI dispatcher reflects the exception class
     name as ``error_type`` so clients can distinguish "subprocess crashed"
     from "handle stale" semantically.
+
+    A held copy's handle (v14) resolves to the held document, so every op
+    that only reads (render, extract, trace, the listings) reads the held
+    pages as they now are.
     """
-    if not isinstance(handle, str) or not handle:
-        raise HandleNotFound(
-            f"handle must be a non-empty string, got {type(handle).__name__}"
-        )
-    doc = _DOC_CACHE.get(handle)
-    if doc is None:
-        raise HandleNotFound(f"unknown or closed handle: {handle}")
-    _DOC_CACHE.move_to_end(handle)
-    return doc
+    entry = _cached(handle)
+    return entry.doc if isinstance(entry, HeldDocument) else entry
+
+
+def _resolve_writable_handle(handle: Any) -> _pymupdf.Document:
+    """:func:`_resolve_handle` for an op that changes the document it saves
+    (every one that saves with ``clean=True`` filters the content in place).
+    A held copy changes only through its page operations, so it is refused."""
+    entry = _cached(handle)
+    if isinstance(entry, HeldDocument):
+        raise NotAHeldCopy("this op would change a held copy; a held copy "
+                           "changes only through burn_page_h and restore_page_h")
+    return entry
+
+
+def _resolve_held(handle: Any) -> HeldDocument:
+    """The held copy ``open_held`` stored under ``handle``."""
+    entry = _cached(handle)
+    if not isinstance(entry, HeldDocument):
+        raise NotAHeldCopy("handle is not a held copy; open one with open_held")
+    return entry
 
 
 def _drop_handle(handle: Any) -> bool:
@@ -1030,7 +1069,7 @@ def _op_search_for_h(cmd: dict) -> dict:
 
 
 def _op_apply_redactions_h(cmd: dict) -> dict:
-    doc = _resolve_handle(_get_handle(cmd))
+    doc = _resolve_writable_handle(_get_handle(cmd))
     matches = cmd.get("matches") or []
     redact_label = cmd.get("redact_label", "")
     active_categories = cmd.get("active_categories")
@@ -1070,7 +1109,7 @@ def _op_strip_metadata_h(cmd: dict) -> dict:
     if you need the original metadata back, reopen via ``open_doc``.
     """
     import io
-    doc = _resolve_handle(_get_handle(cmd))
+    doc = _resolve_writable_handle(_get_handle(cmd))
     _strip_metadata_doc(doc)
     buf = io.BytesIO()
     buf.write(save_document(doc, garbage=4, deflate=True, clean=True))
@@ -1085,7 +1124,7 @@ def _op_set_metadata_h(cmd: dict) -> dict:
     any subsequent ops on this handle.
     """
     import io
-    doc = _resolve_handle(_get_handle(cmd))
+    doc = _resolve_writable_handle(_get_handle(cmd))
     fields = cmd.get("fields")
     if fields is None:
         raise ValueError("op requires 'fields' dict")
@@ -1104,7 +1143,7 @@ def _op_insert_cover_page_h(cmd: dict) -> dict:
     a fresh handle from the original bytes.
     """
     import io
-    doc = _resolve_handle(_get_handle(cmd))
+    doc = _resolve_writable_handle(_get_handle(cmd))
     context = cmd.get("context")
     if context is None:
         raise ValueError("op requires 'context' dict")
@@ -1129,7 +1168,7 @@ def _op_reduce_size_h(cmd: dict) -> dict:
     Like the other ``_h`` save ops this leaves the cached doc in its reduced
     state; callers use it as a save-and-finish step before ``close_doc``.
     """
-    doc = _resolve_handle(_get_handle(cmd))
+    doc = _resolve_writable_handle(_get_handle(cmd))
     dpi = cmd.get("dpi")
     quality = cmd.get("quality", 75)
     grayscale = bool(cmd.get("grayscale", False))
@@ -1167,7 +1206,7 @@ def _op_encrypt_h(cmd: dict) -> dict:
     =False``; already-encrypted input is rejected (the pipeline only encrypts
     cleartext).
     """
-    doc = _resolve_handle(_get_handle(cmd))
+    doc = _resolve_writable_handle(_get_handle(cmd))
     password = cmd.get("password", "")
     if not isinstance(password, str):
         raise ValueError(
@@ -1204,6 +1243,103 @@ def _op_extract_pages_h(cmd: dict) -> dict:
         **_pdf_result(cmd, out_bytes),
         "page_count": to_page - from_page + 1,
     }
+
+
+# ── Held copies (v14) ────────────────────────────────────────────────
+
+
+def _page_field(cmd: dict) -> int:
+    """The required ``page`` field: a page index, never a bool."""
+    page = cmd.get("page")
+    if isinstance(page, bool) or not isinstance(page, int):
+        raise ValueError(f"op requires an integer 'page', got {type(page).__name__}")
+    return page
+
+
+def _flag(cmd: dict, name: str) -> bool:
+    value = cmd.get(name, False)
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean, got {type(value).__name__}")
+    return value
+
+
+def _op_open_held(cmd: dict) -> dict:
+    """Open a held copy of ``pdf_b64`` (or ``pdf_path``): the image edits
+    (``blank_images``, ``remove_images``) and form flattening applied, every
+    page unburned. See ``held.py``."""
+    held = HeldDocument(_decode_pdf(cmd), blank_images=cmd.get("blank_images"),
+                        remove_images=cmd.get("remove_images"))
+    result = {"handle": _store_handle(held), "page_count": len(held.doc)}
+    if held.unseen is not None:
+        result["unseen_images"] = held.unseen
+    return result
+
+
+def _op_burn_page_h(cmd: dict) -> dict:
+    """Burn one page of a held copy and finish it."""
+    held = _resolve_held(_get_handle(cmd))
+    page = _page_field(cmd)
+    removal = held.burn_page(
+        page, cmd.get("matches") or [],
+        redact_label=cmd.get("redact_label", ""),
+        active_categories=cmd.get("active_categories"),
+        keep_uncovered_lines=_keep_uncovered_lines(cmd),
+        blackout=_flag(cmd, "blackout"),
+        remove_text=cmd.get("remove_text"),
+        strip_tags=_flag(cmd, "strip_tags"),
+    )
+    result: dict = {"page": page}
+    if removal is not None:
+        result["text_removal"] = removal
+    return result
+
+
+def _op_restore_page_h(cmd: dict) -> dict:
+    """Put one burned page of a held copy back; ``restored`` lists every page
+    that went back with it, each to be burned again."""
+    held = _resolve_held(_get_handle(cmd))
+    return {"restored": held.restore_page(_page_field(cmd))}
+
+
+def _op_list_tag_text_page_h(cmd: dict) -> dict:
+    """``list_tag_text`` for one page of any handle; on a held copy, the
+    held page as it now is."""
+    doc = _resolve_handle(_get_handle(cmd))
+    page = _page_field(cmd)
+    if not 0 <= page < len(doc):
+        raise IndexError(f"page {page} out of range for {len(doc)}-page document")
+    return list_tag_text(doc, [page])
+
+
+def _op_assemble_h(cmd: dict) -> dict:
+    """The delivered file of a held copy for ``apply_redactions``' payload,
+    made on a fork; the held copy is left as it was."""
+    held = _resolve_held(_get_handle(cmd))
+    for field in ("blank_images", "remove_images", "output_protection"):
+        if cmd.get(field) is not None:
+            raise ValueError(f"assemble_h does not take {field}: the image plan "
+                             "is the held copy's own, and the file is saved "
+                             "without a password")
+    out_bytes, outcome = held.assemble(
+        cmd.get("matches") or [],
+        redact_label=cmd.get("redact_label", ""),
+        active_categories=cmd.get("active_categories"),
+        removed_pages=cmd.get("removed_pages"),
+        blackout_pages=cmd.get("blackout_pages"),
+        remove_text=cmd.get("remove_text"),
+        keep_uncovered_lines=_keep_uncovered_lines(cmd),
+        side_text=cmd.get("side_text"),
+        strip_tags_pages=cmd.get("strip_tags_pages"),
+        metadata=cmd.get("metadata"),
+    )
+    result = _redaction_result(cmd, out_bytes, True, cmd.get("remove_text"),
+                               outcome.get("removal") or {}, outcome.get("side"),
+                               held.unseen)
+    if held.unseen is not None and "unseen_images" not in result:
+        result["unseen_images"] = held.unseen
+    result.pop("protection_applied", None)
+    result["burned_at_assembly"] = outcome["burned_at_assembly"]
+    return result
 
 
 _OPS = {
@@ -1267,6 +1403,12 @@ _OPS = {
     "list_unseen_images_h": _op_list_unseen_images_h,
     "list_tag_text": _op_list_tag_text,
     "list_tag_text_h": _op_list_tag_text_h,
+    # v14 held copies
+    "open_held": _op_open_held,
+    "burn_page_h": _op_burn_page_h,
+    "restore_page_h": _op_restore_page_h,
+    "list_tag_text_page_h": _op_list_tag_text_page_h,
+    "assemble_h": _op_assemble_h,
 }
 
 
