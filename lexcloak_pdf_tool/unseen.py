@@ -355,10 +355,21 @@ def _shown_xrefs(doc, xrefs: set[int], unreadable: list[int]) -> set[int]:
     shown: set[int] = set()
     if not xrefs:
         return shown
+    # What a resource dictionary names, read once for every page that shares
+    # it (v0.16.1): scans that share one dictionary otherwise walked every
+    # scan it names, page after page.
+    named: dict[int, set[int]] = {}
     for pno in range(len(doc)):
         page = doc[pno]
         try:
-            held = {img[0] for img in page.get_images(full=True)} & (xrefs - shown)
+            res = _resources_of(doc, page.xref)
+            shared = res[0] if res is not None and res[1] == "" else None
+            images = named.get(shared) if shared is not None else None
+            if images is None:
+                images = {img[0] for img in page.get_images(full=True)}
+                if shared is not None:
+                    named[shared] = images
+            held = images & (xrefs - shown)
             if not held:
                 continue
             crop = _crop(page)
