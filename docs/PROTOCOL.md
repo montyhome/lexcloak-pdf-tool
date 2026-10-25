@@ -1,7 +1,7 @@
 # Wire Protocol
 
 `lexcloak-pdf-tool` is invoked as a subprocess and communicates with its
-parent via length-prefixed JSON frames over stdin/stdout. **v0.16.0 ships
+parent via length-prefixed JSON frames over stdin/stdout. **v0.16.1 ships
 protocol version 14.** Every earlier version from 2 stays in the supported
 set ({2, 3, ..., 14}) so a current subprocess serves older clients
 cleanly during rolling client upgrades. The table under **Versioning**
@@ -351,7 +351,8 @@ page's content draws by name first, and every image the page's resources name
 only when a draw matches none of those (an inline image, an image drawn by a
 pattern or a font, a soft-masked image, or content it cannot parse). Scans
 that share one resource dictionary no longer make every page hash every scan
-in the file. The result is unchanged.
+in the file, and since 0.16.1 a dictionary many pages share is read once
+rather than once a page. The result is unchanged.
 
 ### `list_tag_text`  *(v12+)*
 
@@ -1211,3 +1212,4 @@ shipping client has caught up.
 | 0.15.1 | 13 | No new ops, no new fields. `trace_text` (+ `_h`) also ends a word between two characters of one span that do not continue each other: a gap of at least 0.15 em, a jump back of more than 0.25 em, or another baseline more than 0.5 em away (see `trace_text`). Before, a word ended only at whitespace, so a `TJ` gap, a line change or a move back inside one text object joined two runs into one word whose box spanned the gap, and a caller comparing that box with a render saw one run's ink for both. `apply_redactions`' `remove_text` and `render_removed` find words in the same trace, so a word `trace_text` reports is still found by its box and text; an entry naming a joined word from 0.15.0 is not found, and is reported kept. The dependency is capped at `pymupdf<2`: PyMuPDF 2.0 changes which glyphs a redaction removes and keeps, and 0.15.0's own tests fail under it. |
 | 0.15.2 | 13 | No new ops, no wire-surface change. Two listings now read what the page shows. (1) `list_unseen_images` (+ `_h`) measures each placement against the area the page shows, its crop box clipped to its media box. A crop box reaching past the media box was measured at its own width and height from the clipped area's corner, so an image beside or below the shown area read as `shown` and was never blanked; `apply_redactions`' `remove_images` takes the same area. A page whose shown area is under a point wide or high, as when its crop box misses its media box, shows nothing, and every placement on it is `outside-crop`. (2) `list_tag_text` (+ `_h`) lists a tag that wraps no glyph whatever extraction returns. MuPDF's extraction returns the text of a tag around an image, which has no characters for the line comparison to find, so such a tag read as returned and was never listed. A tag that repeats the glyphs it wraps is still not listed, and one the line comparison lists is not listed twice. `PROTOCOL_VERSION` stays 13. |
 | 0.16.0 | **14** | Adds held copies: `open_held`, `burn_page_h`, `restore_page_h`, `list_tag_text_page_h` and `assemble_h` (see **Held copies**). A held copy is burned a page at a time, in any order, into one copy of the document, and assembled on a fork into the file `apply_redactions` gives for the same payload: every page's render, words, images, annotations and links, every document structure, and the objects with their numbers blanked. A page put back takes back its own objects and the structure elements its burn edited, and any page sharing a changed one goes back with it. Each burn compresses the streams it creates exactly as the clean save does, through MuPDF's own encoders, so a held copy stays near the source's size plus the file's and the assembly's save has little left to do. Every read-only handle op reads a held copy's pages; the six ops that save a handle's document in place refuse one (`NotAHeldCopy`). `list_unseen_images` (+ `_h`) hashes only the images a page draws when that is enough to name every draw's object, so scans sharing one resource dictionary no longer cost pages times images; its result is unchanged. `apply_redactions` is unchanged: its steps moved into functions the held copy shares, in the same order. The supported set widens to {2, ..., 14}. |
+| 0.16.1 | 14 | No new ops, no wire-surface change. `list_unseen_images` (+ `_h`) reads which images a resource dictionary names once for every page that shares it, where 0.16.0 read it again on each page. On scans sharing one dictionary that was still pages times images: 200 such pages listed in 2.1 s on 0.16.0 and 0.28 s now (14.4 s on 0.15.2), at a flat 1.5 ms a page. The result is unchanged. `PROTOCOL_VERSION` stays 14. |

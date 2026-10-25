@@ -1,4 +1,5 @@
-"""The image listing hashes only what a page draws (v0.16.0).
+"""The image listing hashes only what a page draws (v0.16.0), and reads a
+resource dictionary many pages share once (v0.16.1).
 
 ``list_unseen_images`` finds each image draw's object by hashing images
 until one matches the draw's pixel digest. Until 0.15.2 it hashed every image
@@ -124,6 +125,23 @@ def test_the_listing_decodes_each_page_once_not_once_per_named_image(decodes):
     # The hidden image's page, and every page whose resources name it: one
     # decode for what each draws, not 31.
     assert decodes["n"] <= 2 * 30 + 2
+
+
+def test_a_shared_dictionary_is_read_once_for_every_page_that_shares_it(monkeypatch):
+    calls = {"n": 0}
+    real = pymupdf.Page.get_images
+
+    def counting(self, *args, **kwargs):
+        calls["n"] += 1
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(pymupdf.Page, "get_images", counting)
+    data = _shared_dictionary_scans(30)
+    out = list_unseen_images_pdf(data)
+    assert [u["page"] for u in out["unseen"]] == [29]
+    # One read of the shared dictionary, and one more where the listing
+    # resolves the hidden image's page, not one per page.
+    assert calls["n"] <= 3, calls["n"]
 
 
 def test_an_inline_image_falls_back_to_hashing_every_image(decodes):
